@@ -4,3 +4,4 @@
 sentence-transformers>=3.0.0
 transformers>=4.51.0
 numpy>=1.24
+openpyxl>=3.1          # reads data/coverage_top1_top4_top5.xlsx

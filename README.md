@@ -66,7 +66,25 @@ data/corpus.jsonl                          2,038 chunks to embed
 data/bench_ids.json                        the row order every matrix must follow
 data/queries.jsonl                         once the golden set exists
 data/embedding_calibration_testcases.csv   optional, similarity-calibration pairs
+data/coverage_top1_top4_top5.xlsx          optional, 60 Question/Expected cases
 ```
+
+Everything under `data/` is picked up automatically; anything absent is reported and
+skipped, so you can add files over time and re-run. Each input becomes
+`embeddings/<model>/<input>.npy`:
+
+| input | source | items | encoded as |
+|---|---|---|---|
+| `corpus` | `corpus.jsonl`, ordered by `bench_ids.json` | 2,038 | document |
+| `queries` | `queries.jsonl` | golden set | **query** |
+| `calibration` | CSV, `text_a` + `text_b` per pair | 40 | document |
+| `coverage_questions` | xlsx `Comparison`, `Question` column | 60 | **query** |
+| `coverage_expected` | xlsx `Comparison`, `Expected` column | 60 | document |
+
+The coverage sheet is split in two on purpose. A question is a query and takes Qwen3's
+instruction prefix; an expected answer is a statement and must not, or the two sides of
+the same case are not comparable. Both files keep the `Case` order, so row *i* is the
+same case in each.
 
 Then, on the GPU machine:
 

@@ -13,6 +13,7 @@ Inputs it picks up automatically, skipping whatever is absent:
   data/corpus.jsonl                          the 2,038 chunks being searched
   data/queries.jsonl                         golden-set questions
   data/embedding_calibration_testcases.csv   similarity-calibration pairs
+  data/coverage_top1_top4_top5.xlsx          Comparison sheet, Question + Expected
 """
 import argparse
 import csv
@@ -20,6 +21,7 @@ import hashlib
 import json
 import os
 import time
+import unicodedata
 
 import numpy as np
 
@@ -60,9 +62,61 @@ def sha(t):
     return hashlib.sha256(t.encode("utf-8")).hexdigest()
 
 
+def nfc(t):
+    """The corpus was exported as NFC; every other input must match, or the same
+    Vietnamese word tokenizes two different ways."""
+    return unicodedata.normalize("NFC", str(t)).strip()
+
+
 def load_jsonl(p):
     with open(p, encoding="utf-8") as f:
         return [json.loads(l) for l in f]
+
+
+def load_coverage_xlsx(path):
+    """Read the Comparison sheet and return (case_ids, questions, expected).
+
+    Questions and expected answers are returned separately because they are not the
+    same kind of text: a question is a query and takes Qwen3's instruction prefix,
+    an expected answer is a statement and must not.
+    """
+    try:
+        import openpyxl
+    except ImportError:
+        print("  coverage xlsx found but openpyxl is not installed "
+              "(pip install openpyxl) - skipping")
+        return None
+
+    wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+    sheet = "Comparison" if "Comparison" in wb.sheetnames else wb.sheetnames[0]
+    rows = list(wb[sheet].iter_rows(values_only=True))
+    wb.close()
+    if not rows:
+        return None
+
+    # Match the header case-insensitively; the file capitalises these.
+    header = [str(c).strip().lower() if c is not None else "" for c in rows[0]]
+    try:
+        i_case = header.index("case")
+        i_q = header.index("question")
+        i_e = header.index("expected")
+    except ValueError:
+        print(f"  {os.path.basename(path)}: sheet '{sheet}' has no "
+              f"case/question/expected columns - skipping")
+        return None
+
+    ids, questions, expected = [], [], []
+    for r in rows[1:]:
+        if not any(r):
+            continue
+        q = nfc(r[i_q]) if r[i_q] else ""
+        e = nfc(r[i_e]) if r[i_e] else ""
+        if not (q and e):
+            continue
+        ids.append(str(r[i_case]).strip() if r[i_case] else f"row{len(ids)}")
+        questions.append(q)
+        expected.append(e)
+    return ids, questions, expected
 
 
 def discover_inputs():
@@ -104,8 +158,21 @@ def discover_inputs():
             # Both sides of a pair are plain statements, so both are encoded as
             # documents; a query prompt on one side would skew the cosine.
             ids += [f"{r['pair_id']}__a", f"{r['pair_id']}__b"]
-            texts += [r["text_a"], r["text_b"]]
+            texts += [nfc(r["text_a"]), nfc(r["text_b"])]
         found["calibration"] = {"ids": ids, "texts": texts, "kind": "doc"}
+
+    # Excel leaves a ~$ lock file behind while the workbook is open; skip it.
+    cov_p = os.path.join(d, "coverage_top1_top4_top5.xlsx")
+    if os.path.exists(cov_p) and not os.path.basename(cov_p).startswith("~$"):
+        got = load_coverage_xlsx(cov_p)
+        if got:
+            case_ids, questions, expected = got
+            # Split by kind: the question is a query, the expected answer is not.
+            # Both keep the same Case order, so row i lines up across the two files.
+            found["coverage_questions"] = {
+                "ids": case_ids, "texts": questions, "kind": "query"}
+            found["coverage_expected"] = {
+                "ids": case_ids, "texts": expected, "kind": "doc"}
 
     return found
 
@@ -155,7 +222,9 @@ def main():
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--model", default="all", choices=["all", *MODELS])
     ap.add_argument("--input", default="all",
-                    choices=["all", "corpus", "queries", "calibration"])
+                    choices=["all", "corpus", "queries", "calibration",
+                             "coverage_questions", "coverage_expected", "coverage"],
+                    help="'coverage' means both coverage_questions and coverage_expected")
     ap.add_argument("--batch-size", type=int, default=32)
     ap.add_argument("--fp32", dest="fp16", action="store_false", default=True,
                     help="full precision; slower and needs more VRAM")
@@ -170,18 +239,28 @@ def main():
     if device == "cpu":
         print("  no GPU detected - this will work but take much longer")
 
-    inputs = discover_inputs()
-    if args.input != "all":
-        inputs = {k: v for k, v in inputs.items() if k == args.input}
+    ALL_INPUTS = ("corpus", "queries", "calibration",
+                  "coverage_questions", "coverage_expected")
+
+    available = discover_inputs()
+    if args.input == "all":
+        inputs = available
+    elif args.input == "coverage":
+        inputs = {k: v for k, v in available.items() if k.startswith("coverage_")}
+    else:
+        inputs = {k: v for k, v in available.items() if k == args.input}
     if not inputs:
-        raise SystemExit("nothing to embed - put corpus.jsonl in data/ first")
+        raise SystemExit(f"nothing to embed for --input {args.input} "
+                         f"(found: {', '.join(available) or 'none'})")
+
     print("\ninputs found:")
     for name, d in inputs.items():
         chars = sum(len(t) for t in d["texts"])
-        print(f"  {name:12s} {len(d['texts']):6d} items  {chars:,} chars")
-    for name in ("corpus", "queries", "calibration"):
+        print(f"  {name:20s} {len(d['texts']):6d} items  {chars:,} chars  "
+              f"[{d['kind']}]")
+    for name in ALL_INPUTS:
         if name not in inputs:
-            print(f"  {name:12s} (absent, skipped)")
+            print(f"  {name:20s} (absent, skipped)")
 
     todo = list(MODELS) if args.model == "all" else [args.model]
     log = {"started": time.strftime("%Y-%m-%d %H:%M:%S"), "device": device,
