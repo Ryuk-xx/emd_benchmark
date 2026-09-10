@@ -1,0 +1,6 @@
+# Install on the GPU machine (pick the torch build that matches its CUDA version):
+#   pip install torch --index-url https://download.pytorch.org/whl/cu121
+#   pip install -r requirements-gpu.txt
+sentence-transformers>=3.0.0
+transformers>=4.51.0
+numpy>=1.24

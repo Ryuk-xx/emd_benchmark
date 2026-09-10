@@ -1,0 +1,20 @@
+# Model weights, downloaded per machine
+/models/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Embedding matrices: derived data, and ada002/corpus_full.npy alone is 231 MB,
+# past GitHub's 100 MB per-file hard limit. Regenerate with the pipeline.
+embeddings/
+results/per_query.json
+
+# Corpus and facts exported from Neo4j. These are internal Viettel documents
+# (gói cước, công văn, hướng dẫn nội bộ), so they are kept out of the repo by
+# default. See README for how to move them to the embedding machine.
+data/
+
+# Local secrets
+.env
