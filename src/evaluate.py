@@ -218,7 +218,7 @@ def main():
     # local model puts the instruction's effect straight into the results table.
     ap.add_argument("--models", nargs="+", default=[
         "ada002", "text3large",
-        "vn_embedding/no_instruct", "vn_embedding/instruct",
+        "vn_embedding/no_instruct",
         "qwen3_0.6b/no_instruct", "qwen3_0.6b/instruct",
         "qwen3_vl_2b/no_instruct", "qwen3_vl_2b/instruct",
     ])

@@ -59,10 +59,10 @@ MODELS = {
     "vn_embedding": {
         "hf_id": "AITeamVN/Vietnamese_Embedding",
         "max_seq_length": 2048,
-        # This model descends from BGE-M3, which was NOT trained with instructions.
-        # The prefix below is our own, so `instruct` mode here is an experiment and
-        # is expected to be neutral at best. Measuring that is the point.
-        "query_instruction": "Hãy biểu diễn câu hỏi này để tìm đoạn văn bản liên quan: ",
+        # This model descends from BGE-M3, which was never trained with instructions,
+        # so it has no prefix to apply. query_instruction=None means the instruct mode
+        # is skipped for it entirely rather than duplicating the bare vectors.
+        "query_instruction": None,
         "doc_instruction": None,
     },
     "qwen3_0.6b": {
@@ -358,17 +358,20 @@ def run_model(model_name, cfg, inputs, modes, args):
     man_path = os.path.join(man_dir, "manifest.json")
 
     # Merge per input, not per file: re-running one --input must not erase the
-    # record of vectors written by an earlier run that are still on disk.
+    # record of vectors written by an earlier run that are still on disk. The merge
+    # goes only into the persisted manifest -- `entry` stays this run's own record,
+    # so the run summary reports what actually just ran.
+    persisted = {**entry, "modes": {k: dict(v) for k, v in entry["modes"].items()}}
     if os.path.exists(man_path):
         with open(man_path, encoding="utf-8") as f:
             old = json.load(f)
         for mode, per_input in old.get("modes", {}).items():
             merged = dict(per_input)
-            merged.update(entry["modes"].get(mode, {}))
-            entry["modes"][mode] = merged
+            merged.update(persisted["modes"].get(mode, {}))
+            persisted["modes"][mode] = merged
 
     with open(man_path, "w", encoding="utf-8") as f:
-        json.dump({"model": model_name, **entry, "dtype": "float32",
+        json.dump({"model": model_name, **persisted, "dtype": "float32",
                    "already_l2_normalized": True}, f, ensure_ascii=False)
 
     del model
@@ -433,8 +436,17 @@ def main():
            "qwen_task_description": QWEN_TASK, "models": {}}
 
     for model_name in todo:
+        cfg = MODELS[model_name]
+        # A model with no instruction of its own has nothing to put in instruct mode;
+        # running it would just duplicate the bare vectors under a misleading name.
+        model_modes = [m for m in modes
+                       if m != "instruct" or cfg["query_instruction"]]
+        if len(model_modes) < len(modes):
+            print(f"\n{model_name}: no instruction defined, instruct mode skipped")
+        if not model_modes:
+            continue
         log["models"][model_name] = run_model(
-            model_name, MODELS[model_name], inputs, modes, args)
+            model_name, cfg, inputs, model_modes, args)
 
     log["finished"] = time.strftime("%Y-%m-%d %H:%M:%S")
     os.makedirs(os.path.join(ROOT, "results"), exist_ok=True)
