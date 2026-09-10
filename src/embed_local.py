@@ -178,10 +178,13 @@ def discover_inputs():
             rows = list(csv.DictReader(f))
         # One file per column, sharing the pair_id order, so scoring a pair is a
         # row-wise dot product of the two matrices instead of de-interleaving one.
-        # Both sides are plain statements, hence both encoded as documents: a
-        # prefix on one side only would skew that pair's cosine.
+        #
+        # Side A is treated as the query and side B as the passage, mirroring how
+        # these pairs behave in retrieval. If both were documents the instruction
+        # prefix would apply to neither, and the instruct/no_instruct comparison
+        # would be identical by construction rather than informative.
         ids = [r["pair_id"] for r in rows]
-        found["calibration_a"] = {"ids": ids, "kind": "doc",
+        found["calibration_a"] = {"ids": ids, "kind": "query",
                                   "texts": [nfc(r["text_a"]) for r in rows]}
         found["calibration_b"] = {"ids": ids, "kind": "doc",
                                   "texts": [nfc(r["text_b"]) for r in rows]}

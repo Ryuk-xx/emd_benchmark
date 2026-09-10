@@ -118,7 +118,7 @@ plain dot product, and row *i* is the same item across every model and mode.
 |---|---|---|---|
 | `corpus` | `corpus.jsonl`, ordered by `bench_ids.json` | 2,038 | document |
 | `queries` | `queries.jsonl` | golden set | **query** |
-| `calibration_a` | CSV, `text_a` column | 20 | document |
+| `calibration_a` | CSV, `text_a` column | 20 | **query** |
 | `calibration_b` | CSV, `text_b` column | 20 | document |
 | `coverage_questions` | xlsx `Comparison`, `Question` column | 60 | **query** |
 | `coverage_expected` | xlsx `Comparison`, `Expected` column | 60 | document |
@@ -140,6 +140,27 @@ in the same table.
 python src/evaluate.py
 python src/evaluate.py --models ada002 qwen3_0.6b/instruct qwen3_0.6b/no_instruct
 ```
+
+**5. Score the calibration pairs**
+
+```bash
+python src/score_calibration.py            # -> results/calibration_report.xlsx
+```
+
+Side A is encoded as a query and side B as a passage, mirroring retrieval. Were both
+documents, neither would take the instruction prefix and the instruct/no_instruct
+columns would be identical by construction rather than informative. The cost is that
+the T0 sanity pair no longer reads ~1.0 in `instruct` mode: the prefix on one side
+alone shifts the vector, and how far it shifts is itself worth seeing.
+
+The workbook has four sheets: `per_pair` (cosine per pair per model/mode, beside the
+texts), `by_tier` (means down the ladder), `diagnostics` and `instruct_effect`.
+
+`diagnostics` carries the number that decides deployability, **gap_T1_minus_T2**. T1
+pairs are the same fact reworded; T2 pairs are the same document with a *different
+attribute* (issue date vs effective date). A model whose T1 and T2 means sit on top of
+each other will confidently return the wrong date, and no threshold can separate them.
+Gaps under 0.05 and a broken ladder are highlighted in red.
 
 ## What the report shows
 
