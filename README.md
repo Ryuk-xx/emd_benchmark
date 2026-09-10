@@ -1,6 +1,6 @@
 # Vietnamese embedding benchmark
 
-Comparing four embedding models on a Viettel telecom RAG corpus:
+Comparing five embedding models on a Viettel telecom RAG corpus:
 
 | model | dim | where it runs |
 |---|---|---|
@@ -20,7 +20,7 @@ All filtering happens on the exported copies under `data/`.
 ## Corpus
 
 `data/corpus.jsonl` holds the **2,038 chunks embedded by both OpenAI models**, the only
-set on which all four models can be compared on identical input. The other 35,572 chunks
+set on which every model can be compared on identical input. The other 35,572 chunks
 had ada-002 vectors only; they stay in `data/corpus_full.jsonl` and are excluded from
 scoring. 502 documents, 1.14M cl100k tokens, max 1,201 tokens per chunk — under every
 model's context limit, so nothing is truncated.
@@ -73,22 +73,35 @@ data/coverage_top1_top4_top5.xlsx          optional, 60 Question/Expected cases
 Everything under `data/` is picked up automatically; anything absent is reported and
 skipped, so you can add files over time and re-run.
 
-### Two instruction modes
+### Instruction modes
 
-Every run produces both, so the instruction prefix's effect is measured rather than
-assumed:
+Both modes are produced where a model has an instruction, so the prefix's effect is
+measured rather than assumed:
 
 | mode | what it does |
 |---|---|
 | `no_instruct` | every text encoded bare |
 | `instruct` | query-kind inputs get the model's instruction prefix |
 
-Only query-kind inputs differ, since neither model defines a document-side prefix.
+Only query-kind inputs differ, since no model here defines a document-side prefix.
 When a mode pair would produce identical vectors the encode runs once and the result is
-written to both, reported as `(copied)`. Qwen3's prefix is its documented
-`Instruct: {task}\nQuery: `; Vietnamese_Embedding descends from BGE-M3, which was not
-trained with instructions, so its prefix is ours and `instruct` mode there is an
-experiment expected to be neutral at best.
+written to both, reported as `(copied)`.
+
+Each model takes its own prefix shape, and they are not interchangeable:
+
+| model | `instruct` prefix | note |
+|---|---|---|
+| `qwen3_0.6b` | `Instruct: {task}\nQuery: ` | its documented template |
+| `qwen3_vl_2b` | a plain instruction sentence | **no** `Instruct:`/`Query:` wrapper |
+| `vn_embedding` | none | BGE-M3 lineage, never trained with instructions |
+
+Two things to carry into the results. `vn_embedding` defines no instruction, so its
+`instruct` mode is skipped rather than writing a duplicate of the bare vectors under a
+name implying otherwise — it has a `no_instruct/` directory only. And `qwen3_vl_2b`
+wraps *every* input in a default `Represent the user's input.` system prompt, so its
+`no_instruct` column means "model default instruction", not "no instruction": it is the
+one model whose two modes are not bare-versus-prefixed, and its `no_instruct` is not
+directly comparable to the others'.
 
 ### Storage layout
 
@@ -129,13 +142,14 @@ instruction prefix; an expected answer is a statement and must not, or the two s
 the same case are not comparable. Both files keep the `Case` order, so row *i* is the
 same case in each.
 
-Copy `embeddings/vn_embedding/` and `embeddings/qwen3_0.6b/` back here to score.
+Copy `embeddings/vn_embedding/`, `embeddings/qwen3_0.6b/` and `embeddings/qwen3_vl_2b/`
+back here to score.
 
 **4. Score**
 
 Models are named `<model>/<mode>`; a bare name means `no_instruct`. The default list
-scores both modes of each local model, so the instruction's effect appears as two rows
-in the same table.
+scores both modes of every model that has two, so the instruction's effect appears as
+two rows in the same table.
 
 ```bash
 python src/evaluate.py
