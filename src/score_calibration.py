@@ -236,6 +236,23 @@ def main():
     os.makedirs(R, exist_ok=True)
     wb.save(args.out)
 
+    # --- CSV: the source file with a cosine column appended per model/mode ------
+    # Row order and the original columns are preserved exactly, so this diffs
+    # cleanly against the input and joins on pair_id.
+    with open(CSV_PATH, encoding="utf-8-sig") as f:
+        src_fields = csv.DictReader(f).fieldnames
+    score_fields = [f"cos_{k.replace('/', '_')}" for k in cols]
+    csv_out = os.path.splitext(args.out)[0] + ".csv"
+    with open(csv_out, "w", encoding="utf-8-sig", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=list(src_fields) + score_fields)
+        w.writeheader()
+        for i, p in enumerate(pairs):
+            row = {k: p.get(k, "") for k in src_fields}
+            for name, c in zip(score_fields, cols.values()):
+                row[name] = f"{float(c[i]):.4f}"
+            w.writerow(row)
+    print(f"csv    -> {os.path.relpath(csv_out, ROOT)}")
+
     # --- console summary ----------------------------------------------------
     print(f"\n{'model/mode':<28}{'T0':>7}{'T1':>7}{'T5':>7}{'T2':>7}{'T3':>7}"
           f"{'T4':>7}{'T1-T2':>8}")
