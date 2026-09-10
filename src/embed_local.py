@@ -1,29 +1,42 @@
-"""Embed the benchmark corpus (or queries) with the local open-source models.
+"""Embed the benchmark inputs with the two local open-source models.
 
-Run this on the GPU machine. It needs only this file plus the data/ directory.
+Weights download automatically on first run into ./models/ (gitignored) and are
+reused afterwards, so the second run starts encoding immediately. Vectors and a
+timing log land in ./embeddings/<model>/.
 
-  python src/embed_local.py --model vn_embedding --input corpus
-  python src/embed_local.py --model qwen3_0.6b  --input corpus
+  python src/embed_local.py                      # both models, every input present
+  python src/embed_local.py --model qwen3_0.6b   # one model
+  python src/embed_local.py --input corpus       # one input
+  python src/embed_local.py --batch-size 8       # if VRAM is tight
 
-Both models are encoded through sentence-transformers so that pooling, padding side
-and normalization follow each model's own configuration rather than our guesswork.
-The one thing that is NOT automatic is Qwen3's query instruction: it is applied to
-queries only, never to documents, and the exact string is recorded in the manifest.
+Inputs it picks up automatically, skipping whatever is absent:
+  data/corpus.jsonl                          the 2,038 chunks being searched
+  data/queries.jsonl                         golden-set questions
+  data/embedding_calibration_testcases.csv   similarity-calibration pairs
 """
 import argparse
+import csv
 import hashlib
 import json
 import os
 import time
 
 import numpy as np
-import torch
-from sentence_transformers import SentenceTransformer
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+MODEL_CACHE = os.path.join(ROOT, "models")
 
-# Qwen3-Embedding is instruction-tuned: the task description materially changes the
-# query vector. Keep it fixed across the whole benchmark and record it.
+# Hugging Face must be pointed at the local cache before transformers is imported.
+os.makedirs(MODEL_CACHE, exist_ok=True)
+os.environ.setdefault("HF_HOME", MODEL_CACHE)
+os.environ.setdefault("SENTENCE_TRANSFORMERS_HOME", MODEL_CACHE)
+
+import torch                                            # noqa: E402
+from sentence_transformers import SentenceTransformer   # noqa: E402
+
+# Qwen3-Embedding is instruction-tuned: this string is prepended to queries only,
+# never to documents, and changing it changes every query vector. Keep it fixed
+# for the whole benchmark.
 QWEN_TASK = ("Given a Vietnamese customer-service question about telecom services, "
              "retrieve the passages that answer it")
 
@@ -36,7 +49,7 @@ MODELS = {
     },
     "qwen3_0.6b": {
         "hf_id": "Qwen/Qwen3-Embedding-0.6B",
-        "max_seq_length": 2048,        # corpus max is 1201 tokens; 2048 is ample
+        "max_seq_length": 2048,        # corpus max is 1,201 tokens, so nothing is cut
         "query_prompt": f"Instruct: {QWEN_TASK}\nQuery: ",
         "doc_prompt": None,            # documents are embedded bare
     },
@@ -47,91 +60,242 @@ def sha(t):
     return hashlib.sha256(t.encode("utf-8")).hexdigest()
 
 
+def load_jsonl(p):
+    with open(p, encoding="utf-8") as f:
+        return [json.loads(l) for l in f]
+
+
+def discover_inputs():
+    """Collect whichever inputs exist. 'kind' decides whether a prompt is applied."""
+    d = os.path.join(ROOT, "data")
+    found = {}
+
+    corpus_p = os.path.join(d, "corpus.jsonl")
+    ids_p = os.path.join(d, "bench_ids.json")
+    if os.path.exists(corpus_p):
+        rows = load_jsonl(corpus_p)
+        by_id = {r["chunk_id"]: r for r in rows}
+        if os.path.exists(ids_p):
+            # bench_ids.json fixes the row order shared by every model's matrix;
+            # evaluate.py asserts it, so honour it rather than the file order.
+            with open(ids_p, encoding="utf-8") as f:
+                order = json.load(f)
+            missing = [c for c in order if c not in by_id]
+            if missing:
+                raise SystemExit(f"{len(missing)} ids in bench_ids.json missing from corpus.jsonl")
+            rows = [by_id[c] for c in order]
+            ids = order
+        else:
+            ids = [r["chunk_id"] for r in rows]
+        found["corpus"] = {"ids": ids, "texts": [r["text"] for r in rows], "kind": "doc"}
+
+    queries_p = os.path.join(d, "queries.jsonl")
+    if os.path.exists(queries_p):
+        rows = load_jsonl(queries_p)
+        found["queries"] = {"ids": [r["query_id"] for r in rows],
+                            "texts": [r["text"] for r in rows], "kind": "query"}
+
+    calib_p = os.path.join(d, "embedding_calibration_testcases.csv")
+    if os.path.exists(calib_p):
+        with open(calib_p, encoding="utf-8-sig") as f:
+            rows = list(csv.DictReader(f))
+        ids, texts = [], []
+        for r in rows:
+            # Both sides of a pair are plain statements, so both are encoded as
+            # documents; a query prompt on one side would skew the cosine.
+            ids += [f"{r['pair_id']}__a", f"{r['pair_id']}__b"]
+            texts += [r["text_a"], r["text_b"]]
+        found["calibration"] = {"ids": ids, "texts": texts, "kind": "doc"}
+
+    return found
+
+
+def encode_timed(model, texts, prompt, batch_size, device):
+    """Encode in timed batches so the log carries a throughput distribution."""
+    out, times = [], []
+    for i in range(0, len(texts), batch_size):
+        batch = texts[i:i + batch_size]
+        if device == "cuda":
+            torch.cuda.synchronize()
+        t0 = time.perf_counter()
+        v = model.encode(batch, batch_size=batch_size, prompt=prompt,
+                         normalize_embeddings=True, convert_to_numpy=True,
+                         show_progress_bar=False)
+        if device == "cuda":
+            torch.cuda.synchronize()
+        times.append(time.perf_counter() - t0)
+        out.append(v)
+        done = min(i + batch_size, len(texts))
+        if (i // batch_size) % 10 == 0 or done == len(texts):
+            rate = done / sum(times)
+            print(f"     {done:6d}/{len(texts)}  {rate:7.1f} items/s  "
+                  f"eta {(len(texts) - done) / rate:5.0f}s", flush=True)
+    return np.vstack(out).astype(np.float32), times
+
+
+def measure_latency(model, texts, prompt, device, n=20):
+    """Single-item latency after warm-up: the production query path, which batch
+    throughput does not predict."""
+    for t in texts[:5]:
+        model.encode([t], prompt=prompt, normalize_embeddings=True)
+    lat = []
+    for t in texts[:n]:
+        if device == "cuda":
+            torch.cuda.synchronize()
+        t0 = time.perf_counter()
+        model.encode([t], prompt=prompt, normalize_embeddings=True)
+        if device == "cuda":
+            torch.cuda.synchronize()
+        lat.append((time.perf_counter() - t0) * 1000)
+    return lat
+
+
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--model", required=True, choices=list(MODELS))
-    ap.add_argument("--input", default="corpus", choices=["corpus", "queries"])
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--model", default="all", choices=["all", *MODELS])
+    ap.add_argument("--input", default="all",
+                    choices=["all", "corpus", "queries", "calibration"])
     ap.add_argument("--batch-size", type=int, default=32)
-    ap.add_argument("--fp16", action="store_true", default=True)
-    ap.add_argument("--fp32", dest="fp16", action="store_false")
+    ap.add_argument("--fp32", dest="fp16", action="store_false", default=True,
+                    help="full precision; slower and needs more VRAM")
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     args = ap.parse_args()
 
-    cfg = MODELS[args.model]
-    src = os.path.join(ROOT, "data", f"{args.input}.jsonl")
-    rows = [json.loads(l) for l in open(src, encoding="utf-8")]
+    device = args.device
+    print(f"device      : {device}"
+          + (f" ({torch.cuda.get_device_name(0)})" if device == "cuda" else ""))
+    print(f"precision   : {'fp16' if args.fp16 else 'fp32'}, batch {args.batch_size}")
+    print(f"weight cache: {MODEL_CACHE}")
+    if device == "cpu":
+        print("  no GPU detected - this will work but take much longer")
 
-    if args.input == "corpus":
-        # bench_ids.json fixes the row order shared by every model's matrix.
-        order = json.load(open(os.path.join(ROOT, "data", "bench_ids.json"), encoding="utf-8"))
-        by_id = {r["chunk_id"]: r for r in rows}
-        rows = [by_id[c] for c in order]
-        ids = order
-        prompt = cfg["doc_prompt"]
-    else:
-        ids = [r["query_id"] for r in rows]
-        prompt = cfg["query_prompt"]
+    inputs = discover_inputs()
+    if args.input != "all":
+        inputs = {k: v for k, v in inputs.items() if k == args.input}
+    if not inputs:
+        raise SystemExit("nothing to embed - put corpus.jsonl in data/ first")
+    print("\ninputs found:")
+    for name, d in inputs.items():
+        chars = sum(len(t) for t in d["texts"])
+        print(f"  {name:12s} {len(d['texts']):6d} items  {chars:,} chars")
+    for name in ("corpus", "queries", "calibration"):
+        if name not in inputs:
+            print(f"  {name:12s} (absent, skipped)")
 
-    texts = [r["text"] for r in rows]
-    print(f"{args.model}: {len(texts)} {args.input} on {args.device} "
-          f"({'fp16' if args.fp16 else 'fp32'}), prompt={prompt!r}")
+    todo = list(MODELS) if args.model == "all" else [args.model]
+    log = {"started": time.strftime("%Y-%m-%d %H:%M:%S"), "device": device,
+           "gpu": torch.cuda.get_device_name(0) if device == "cuda" else None,
+           "precision": "fp16" if args.fp16 else "fp32",
+           "batch_size": args.batch_size, "qwen_task_description": QWEN_TASK,
+           "models": {}}
 
-    model = SentenceTransformer(
-        cfg["hf_id"], device=args.device,
-        model_kwargs={"torch_dtype": torch.float16} if args.fp16 else {},
-    )
-    model.max_seq_length = cfg["max_seq_length"]
+    for model_name in todo:
+        cfg = MODELS[model_name]
+        print(f"\n{'=' * 70}\n{model_name}  ({cfg['hf_id']})\n{'=' * 70}")
+        if device == "cuda":
+            torch.cuda.empty_cache()
+            torch.cuda.reset_peak_memory_stats()
 
-    t0 = time.perf_counter()
-    X = model.encode(
-        texts, batch_size=args.batch_size, prompt=prompt,
-        normalize_embeddings=True,          # cosine == dot product downstream
-        convert_to_numpy=True, show_progress_bar=True,
-    ).astype(np.float32)
-    dt = time.perf_counter() - t0
+        t0 = time.perf_counter()
+        print("  loading (first run downloads the weights)...", flush=True)
+        model = SentenceTransformer(
+            cfg["hf_id"], device=device, cache_folder=MODEL_CACHE,
+            model_kwargs={"torch_dtype": torch.float16} if args.fp16 else {},
+        )
+        model.max_seq_length = cfg["max_seq_length"]
+        load_s = round(time.perf_counter() - t0, 2)
+        dim = model.get_sentence_embedding_dimension()
+        print(f"  ready in {load_s}s, dim={dim}")
 
-    # Single-item latency matters for the query path in production; measure it separately.
-    warm = texts[: min(20, len(texts))]
-    model.encode(warm[:5], prompt=prompt, normalize_embeddings=True)   # warm-up
-    lat = []
-    for t in warm:
-        s = time.perf_counter()
-        model.encode([t], prompt=prompt, normalize_embeddings=True)
-        lat.append((time.perf_counter() - s) * 1000)
+        out_dir = os.path.join(ROOT, "embeddings", model_name)
+        os.makedirs(out_dir, exist_ok=True)
+        entry = {"hf_id": cfg["hf_id"], "dim": dim, "load_seconds": load_s,
+                 "max_seq_length": cfg["max_seq_length"], "inputs": {}}
 
-    out = os.path.join(ROOT, "embeddings", args.model)
-    os.makedirs(out, exist_ok=True)
-    np.save(os.path.join(out, f"{args.input}.npy"), X)
-    json.dump(ids, open(os.path.join(out, f"ids_{args.input}.json"), "w"), ensure_ascii=False)
+        for input_name, data in inputs.items():
+            prompt = cfg["query_prompt"] if data["kind"] == "query" else cfg["doc_prompt"]
+            texts, ids = data["texts"], data["ids"]
+            print(f"  -- {input_name}: {len(texts)} items, prompt={prompt!r}")
 
-    man_path = os.path.join(out, "manifest.json")
-    man = json.load(open(man_path, encoding="utf-8")) if os.path.exists(man_path) else {}
-    man.update({
-        "model": args.model, "hf_id": cfg["hf_id"], "dim": int(X.shape[1]),
-        "max_seq_length": cfg["max_seq_length"], "dtype": "float32",
-        "already_l2_normalized": True,
-        "qwen_task_description": QWEN_TASK if args.model.startswith("qwen") else None,
-    })
-    man[args.input] = {
-        "n": int(X.shape[0]),
-        "prompt": prompt,
-        "batch_size": args.batch_size,
-        "precision": "fp16" if args.fp16 else "fp32",
-        "device": args.device,
-        "gpu": torch.cuda.get_device_name(0) if args.device.startswith("cuda") else None,
-        "encode_seconds": round(dt, 2),
-        "items_per_second": round(len(texts) / dt, 1),
-        "single_item_latency_ms": {
-            "p50": round(float(np.percentile(lat, 50)), 1),
-            "p95": round(float(np.percentile(lat, 95)), 1),
-        },
-        "text_sha256": {i: sha(t) for i, t in zip(ids, texts)},
-    }
-    json.dump(man, open(man_path, "w"), ensure_ascii=False)
+            # Count with this model's own tokenizer to prove nothing was truncated.
+            n_tok = [len(model.tokenizer.encode(t, add_special_tokens=True)) for t in texts]
+            truncated = int(sum(n > cfg["max_seq_length"] for n in n_tok))
+            print(f"     tokens: total {sum(n_tok):,}  max {max(n_tok)}  "
+                  f"truncated: {truncated}")
 
-    print(f"  -> {X.shape} in {dt:.1f}s ({len(texts)/dt:.1f}/s), "
-          f"single-item p50 {np.percentile(lat,50):.0f}ms p95 {np.percentile(lat,95):.0f}ms")
-    print(f"  -> {out}")
+            X, batch_times = encode_timed(model, texts, prompt, args.batch_size, device)
+            total = sum(batch_times)
+            lat = measure_latency(model, texts, prompt, device)
+
+            np.save(os.path.join(out_dir, f"{input_name}.npy"), X)
+            id_file = "ids.json" if input_name == "corpus" else f"ids_{input_name}.json"
+            with open(os.path.join(out_dir, id_file), "w", encoding="utf-8") as f:
+                json.dump(ids, f, ensure_ascii=False)
+
+            entry["inputs"][input_name] = {
+                "n": len(texts), "shape": list(X.shape), "prompt": prompt,
+                "tokens_total": int(sum(n_tok)), "tokens_max": int(max(n_tok)),
+                "tokens_truncated": truncated,
+                "encode_seconds": round(total, 2),
+                "items_per_second": round(len(texts) / total, 1),
+                "tokens_per_second": round(sum(n_tok) / total, 1),
+                "batch_seconds": {
+                    "n_batches": len(batch_times),
+                    "mean": round(float(np.mean(batch_times)), 4),
+                    "p50": round(float(np.percentile(batch_times, 50)), 4),
+                    "p95": round(float(np.percentile(batch_times, 95)), 4),
+                    "first": round(batch_times[0], 4),
+                },
+                "single_item_latency_ms": {
+                    "p50": round(float(np.percentile(lat, 50)), 1),
+                    "p95": round(float(np.percentile(lat, 95)), 1),
+                },
+                "text_sha256": {i: sha(t) for i, t in zip(ids, texts)},
+            }
+            print(f"     done {X.shape} in {total:.1f}s "
+                  f"({len(texts) / total:.1f} items/s), "
+                  f"1-item p50 {np.percentile(lat, 50):.0f}ms "
+                  f"p95 {np.percentile(lat, 95):.0f}ms")
+
+        if device == "cuda":
+            entry["peak_vram_gb"] = round(torch.cuda.max_memory_allocated() / 1e9, 2)
+            print(f"  peak VRAM {entry['peak_vram_gb']} GB")
+
+        with open(os.path.join(out_dir, "manifest.json"), "w", encoding="utf-8") as f:
+            json.dump({"model": model_name, **entry, "dtype": "float32",
+                       "already_l2_normalized": True}, f, ensure_ascii=False)
+
+        log["models"][model_name] = entry
+        del model
+        if device == "cuda":
+            torch.cuda.empty_cache()
+
+    log["finished"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    os.makedirs(os.path.join(ROOT, "results"), exist_ok=True)
+    log_path = os.path.join(ROOT, "results", "embedding_timing.json")
+    with open(log_path, "w", encoding="utf-8") as f:
+        json.dump(log, f, ensure_ascii=False, indent=2)
+
+    print(f"\n{'=' * 70}")
+    print(f"{'model':<16}{'input':<14}{'n':>7}{'sec':>9}{'items/s':>10}"
+          f"{'p50 ms':>9}{'p95 ms':>9}")
+    for m, e in log["models"].items():
+        for i, s in e["inputs"].items():
+            print(f"{m:<16}{i:<14}{s['n']:>7}{s['encode_seconds']:>9}"
+                  f"{s['items_per_second']:>10}"
+                  f"{s['single_item_latency_ms']['p50']:>9}"
+                  f"{s['single_item_latency_ms']['p95']:>9}")
+    print(f"\ntiming log -> {os.path.relpath(log_path, ROOT)}")
+
+    bad = [(m, i) for m, e in log["models"].items()
+           for i, s in e["inputs"].items() if s["tokens_truncated"]]
+    if bad:
+        print("\nWARNING truncated inputs:", bad)
+    if "queries" in inputs and "qwen3_0.6b" in log["models"]:
+        p = log["models"]["qwen3_0.6b"]["inputs"]["queries"]["prompt"]
+        print("qwen3 query prompt: " + (repr(p) if p else
+              "MISSING - scores would understate this model, re-run"))
 
 
 if __name__ == "__main__":

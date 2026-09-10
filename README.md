@@ -58,36 +58,47 @@ and `nodiacritic_abbrev` — how Vietnamese users actually type.
 
 **3. Embed with the local models** — on the GPU machine
 
-`data/` is not in the repo (see `.gitignore`), so clone the code and move the data across
-separately. The embedding step needs two files, 4.5 MB in total:
+`data/` is gitignored — it holds internal documents — so clone the code and move the data
+across separately. The embedding step needs these files, 4.5 MB in total:
 
 ```
-data/corpus.jsonl      2,038 chunks to embed
-data/bench_ids.json    the row order every matrix must follow
-data/queries.jsonl     once the golden set exists
+data/corpus.jsonl                          2,038 chunks to embed
+data/bench_ids.json                        the row order every matrix must follow
+data/queries.jsonl                         once the golden set exists
+data/embedding_calibration_testcases.csv   optional, similarity-calibration pairs
 ```
 
-Then, on that machine:
+Then, on the GPU machine:
 
 ```bash
 git clone -b dev https://github.com/Ryuk-xx/emd_benchmark.git
-cd emd_benchmark && mkdir -p data && cp /path/to/corpus.jsonl data/   # and bench_ids.json
+cd emd_benchmark
+mkdir -p data && cp /path/to/corpus.jsonl /path/to/bench_ids.json data/
 
 pip install torch --index-url https://download.pytorch.org/whl/cu121   # match its CUDA
 pip install -r requirements-gpu.txt
 
-python src/embed_local.py --model vn_embedding --input corpus
-python src/embed_local.py --model vn_embedding --input queries
-python src/embed_local.py --model qwen3_0.6b  --input corpus
-python src/embed_local.py --model qwen3_0.6b  --input queries
+python src/embed_local.py
 ```
 
-Copy `embeddings/vn_embedding/` and `embeddings/qwen3_0.6b/` back here to score.
+That one command does everything: it downloads both models' weights into `models/` on
+first run (reused afterwards), encodes every input it finds under `data/`, and writes
+vectors plus timings to `embeddings/<model>/`.
+
+```bash
+python src/embed_local.py --model qwen3_0.6b   # just one model
+python src/embed_local.py --input corpus       # just one input
+python src/embed_local.py --batch-size 8       # if VRAM is tight
+python src/embed_local.py --fp32               # full precision
+```
 
 Both models fit in ~1.2 GB VRAM at fp16, and the corpus is only 1.14M tokens, so each
-pass takes minutes. `--fp32` and `--batch-size` are available if VRAM is tight.
-Each run writes `manifest.json` beside the vectors with encode time, items/s,
-single-item p50/p95 latency and the exact prompt used.
+pass takes minutes. Every run writes `embeddings/<model>/manifest.json` and
+`results/embedding_timing.json` with encode time, items/s, tokens/s, per-batch
+percentiles, single-item p50/p95 latency, peak VRAM and the exact prompt used, and it
+flags any input that had to be truncated.
+
+Copy `embeddings/vn_embedding/` and `embeddings/qwen3_0.6b/` back here to score.
 
 > **Qwen3 needs its query instruction.** `embed_local.py` applies
 > `Instruct: {task}\nQuery: ` to queries and nothing to documents, and records the exact
