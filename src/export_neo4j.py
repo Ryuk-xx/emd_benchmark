@@ -119,7 +119,7 @@ def main() -> None:
     ):
         if not vecs:
             continue
-        d = os.path.join(ROOT, "embeddings", name)
+        d = os.path.join(ROOT, "embeddings", name, "no_instruct")
         os.makedirs(d, exist_ok=True)
         arr = np.vstack(vecs)
         np.save(os.path.join(d, "corpus.npy"), arr)
@@ -136,7 +136,8 @@ def main() -> None:
             "norm_max": float(norms.max()),
             "text_sha256": dict(zip(ids, shas)),
         }
-        json.dump(manifest, open(os.path.join(d, "manifest.json"), "w"), ensure_ascii=False)
+        json.dump(manifest, open(os.path.join(ROOT, "embeddings", name, "manifest.json"), "w"),
+                  ensure_ascii=False)
         print(f"{name}: {arr.shape} -> {d}  normalized={manifest['already_l2_normalized']}")
 
     print(f"\ncorpus.jsonl: {n} chunks (NFC rewrote {nfc_changed})")

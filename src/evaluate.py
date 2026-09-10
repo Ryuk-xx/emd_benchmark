@@ -9,7 +9,11 @@ Design choices that keep the comparison honest:
   * bootstrap confidence intervals, and paired bootstrap for model-vs-model deltas,
     since a one-point gap over a few hundred queries is usually noise
 
-  python src/evaluate.py --models ada002 text3large vn_embedding qwen3_0.6b
+Models are named <model>/<mode>; a bare name means no_instruct. Listing both modes
+of a local model puts the instruction prefix's effect straight into the table.
+
+  python src/evaluate.py
+  python src/evaluate.py --models ada002 qwen3_0.6b/instruct qwen3_0.6b/no_instruct
 """
 import argparse
 import collections
@@ -85,8 +89,13 @@ def paired_boot(a, b, n=1000, seed=0):
 # ---------------------------------------------------------------- retrievers
 
 def dense_ranking(model, order, queries, topk):
-    """Returns {query_id: [chunk_id, ...]} or None when the model's vectors are missing."""
-    d = os.path.join(E, model)
+    """Rank with one model/mode pair, e.g. "qwen3_0.6b/instruct".
+
+    A bare model name means no_instruct, the only mode the OpenAI models have.
+    Returns None when that pair has no vectors yet.
+    """
+    name, _, mode = model.partition("/")
+    d = os.path.join(E, name, mode or "no_instruct")
     cp, qp = os.path.join(d, "corpus.npy"), os.path.join(d, "queries.npy")
     if not (os.path.exists(cp) and os.path.exists(qp)):
         return None
@@ -190,7 +199,7 @@ def table(results, queries, metric, subset=None, label=""):
     qmeta = {q["query_id"]: q for q in queries}
     sel = [q for q in qmeta if subset is None or subset(qmeta[q])]
     print(f"\n### {metric}{(' | ' + label) if label else ''}  (n={len(sel)} queries)")
-    print(f"{'model':<22}{'mean':>8}{'95% CI':>20}")
+    print(f"{'model':<26}{'mean':>8}{'95% CI':>20}")
     ranked = []
     for r in results:
         vals = [r["per_query"][q][metric] for q in sel if q in r["per_query"]]
@@ -199,14 +208,19 @@ def table(results, queries, metric, subset=None, label=""):
         m, lo, hi = boot_ci(vals)
         ranked.append((m, r["model"], lo, hi))
     for m, name, lo, hi in sorted(ranked, reverse=True):
-        print(f"{name:<22}{m:>8.4f}{f'[{lo:.4f}, {hi:.4f}]':>20}")
+        print(f"{name:<26}{m:>8.4f}{f'[{lo:.4f}, {hi:.4f}]':>20}")
     return sel
 
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--models", nargs="+",
-                    default=["ada002", "text3large", "vn_embedding", "qwen3_0.6b"])
+    # model/mode pairs; a bare name means no_instruct. Listing both modes of a
+    # local model puts the instruction's effect straight into the results table.
+    ap.add_argument("--models", nargs="+", default=[
+        "ada002", "text3large",
+        "vn_embedding/no_instruct", "vn_embedding/instruct",
+        "qwen3_0.6b/no_instruct", "qwen3_0.6b/instruct",
+    ])
     ap.add_argument("--topk", type=int, default=100)
     ap.add_argument("--primary", default="ndcg@10")
     args = ap.parse_args()
@@ -247,10 +261,10 @@ def main():
         vals = [v[args.primary] for q, v in r["per_query"].items() if orig(qmeta[q])]
         base[r["model"]] = np.mean(vals) if vals else float("nan")
     w = max(13, max(len(v) for v in variants) + 2)
-    header = f"{'model':<22}" + "".join(f"{v:>{w}}" for v in variants)
+    header = f"{'model':<26}" + "".join(f"{v:>{w}}" for v in variants)
     print(header)
     for r in sorted(results, key=lambda r: -base[r["model"]]):
-        line = f"{r['model']:<22}"
+        line = f"{r['model']:<26}"
         for v in variants:
             vals = [x[args.primary] for q, x in r["per_query"].items()
                     if qmeta[q].get("variant") == v]

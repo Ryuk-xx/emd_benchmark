@@ -22,7 +22,8 @@ rows = [json.loads(l) for l in open(full_path, encoding="utf-8")]
 print(f"full corpus: {len(rows)} chunks")
 
 # Intersect the id sets of every model we already have vectors for.
-have = {m: set(json.load(open(os.path.join(E, m, "ids.json"), encoding="utf-8"))) for m in MODELS}
+have = {m: set(json.load(open(os.path.join(E, m, "no_instruct", "ids.json"),
+                                       encoding="utf-8"))) for m in MODELS}
 for m in MODELS:
     print(f"  {m:12s} {len(have[m]):6d}")
 keep = set.intersection(*have.values())
@@ -40,7 +41,7 @@ with open(os.path.join(D, "corpus.jsonl"), "w", encoding="utf-8") as f:
         f.write(json.dumps(r, ensure_ascii=False) + "\n")
 
 for m in MODELS:
-    d = os.path.join(E, m)
+    d = os.path.join(E, m, "no_instruct")
     X = np.load(os.path.join(d, "corpus.npy"))
     ids = json.load(open(os.path.join(d, "ids.json"), encoding="utf-8"))
     idx = np.array([i for i, c in enumerate(ids) if c in keep])
@@ -55,7 +56,7 @@ for m in MODELS:
     np.save(os.path.join(d, "corpus.npy"), Xk)
     json.dump(order, open(os.path.join(d, "ids.json"), "w"), ensure_ascii=False)
 
-    man_path = os.path.join(d, "manifest.json")
+    man_path = os.path.join(E, m, "manifest.json")
     man = json.load(open(man_path, encoding="utf-8"))
     man["n"] = int(Xk.shape[0])
     man["filtered"] = "chunks embedded by all models only"

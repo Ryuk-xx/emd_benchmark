@@ -70,8 +70,44 @@ data/coverage_top1_top4_top5.xlsx          optional, 60 Question/Expected cases
 ```
 
 Everything under `data/` is picked up automatically; anything absent is reported and
-skipped, so you can add files over time and re-run. Each input becomes
-`embeddings/<model>/<input>.npy`:
+skipped, so you can add files over time and re-run.
+
+### Two instruction modes
+
+Every run produces both, so the instruction prefix's effect is measured rather than
+assumed:
+
+| mode | what it does |
+|---|---|
+| `no_instruct` | every text encoded bare |
+| `instruct` | query-kind inputs get the model's instruction prefix |
+
+Only query-kind inputs differ, since neither model defines a document-side prefix.
+When a mode pair would produce identical vectors the encode runs once and the result is
+written to both, reported as `(copied)`. Qwen3's prefix is its documented
+`Instruct: {task}\nQuery: `; Vietnamese_Embedding descends from BGE-M3, which was not
+trained with instructions, so its prefix is ours and `instruct` mode there is an
+experiment expected to be neutral at best.
+
+### Storage layout
+
+```
+embeddings/
+  <model>/
+    manifest.json              dims, load time, timings, prompts, per-text sha256
+    no_instruct/
+      corpus.npy    ids.json           ordered by data/bench_ids.json
+      queries.npy   ids_queries.json
+      calibration.npy            ids_calibration.json
+      coverage_questions.npy     ids_coverage_questions.json
+      coverage_expected.npy      ids_coverage_expected.json
+    instruct/
+      ... same file names ...
+```
+
+`ada002` and `text3large` have a `no_instruct/` directory only: the OpenAI embedding
+API takes no instruction. Every matrix is float32 and L2-normalized, so cosine is a
+plain dot product, and row *i* is the same item across every model and mode.
 
 | input | source | items | encoded as |
 |---|---|---|---|
@@ -81,52 +117,22 @@ skipped, so you can add files over time and re-run. Each input becomes
 | `coverage_questions` | xlsx `Comparison`, `Question` column | 60 | **query** |
 | `coverage_expected` | xlsx `Comparison`, `Expected` column | 60 | document |
 
-The coverage sheet is split in two on purpose. A question is a query and takes Qwen3's
+The coverage sheet is split in two on purpose. A question is a query and takes the
 instruction prefix; an expected answer is a statement and must not, or the two sides of
 the same case are not comparable. Both files keep the `Case` order, so row *i* is the
 same case in each.
 
-Then, on the GPU machine:
-
-```bash
-git clone -b dev https://github.com/Ryuk-xx/emd_benchmark.git
-cd emd_benchmark
-mkdir -p data && cp /path/to/corpus.jsonl /path/to/bench_ids.json data/
-
-pip install torch --index-url https://download.pytorch.org/whl/cu121   # match its CUDA
-pip install -r requirements-gpu.txt
-
-python src/embed_local.py
-```
-
-That one command does everything: it downloads both models' weights into `models/` on
-first run (reused afterwards), encodes every input it finds under `data/`, and writes
-vectors plus timings to `embeddings/<model>/`.
-
-```bash
-python src/embed_local.py --model qwen3_0.6b   # just one model
-python src/embed_local.py --input corpus       # just one input
-python src/embed_local.py --batch-size 8       # if VRAM is tight
-python src/embed_local.py --fp32               # full precision
-```
-
-Both models fit in ~1.2 GB VRAM at fp16, and the corpus is only 1.14M tokens, so each
-pass takes minutes. Every run writes `embeddings/<model>/manifest.json` and
-`results/embedding_timing.json` with encode time, items/s, tokens/s, per-batch
-percentiles, single-item p50/p95 latency, peak VRAM and the exact prompt used, and it
-flags any input that had to be truncated.
-
 Copy `embeddings/vn_embedding/` and `embeddings/qwen3_0.6b/` back here to score.
-
-> **Qwen3 needs its query instruction.** `embed_local.py` applies
-> `Instruct: {task}\nQuery: ` to queries and nothing to documents, and records the exact
-> task string in the manifest. Getting this wrong is the single most common way to
-> under-report Qwen3 by several points, so do not paste the prefix in by hand.
 
 **4. Score**
 
+Models are named `<model>/<mode>`; a bare name means `no_instruct`. The default list
+scores both modes of each local model, so the instruction's effect appears as two rows
+in the same table.
+
 ```bash
-python src/evaluate.py --models ada002 text3large vn_embedding qwen3_0.6b
+python src/evaluate.py
+python src/evaluate.py --models ada002 qwen3_0.6b/instruct qwen3_0.6b/no_instruct
 ```
 
 ## What the report shows
