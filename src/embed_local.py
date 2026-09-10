@@ -22,7 +22,8 @@ runs once and the result is written to both, and the summary says so.
 Inputs are discovered under data/, and anything absent is reported and skipped:
   corpus.jsonl                          the chunks being searched      [doc]
   queries.jsonl                         golden-set questions           [query]
-  embedding_calibration_testcases.csv   similarity pairs, a and b      [doc]
+  embedding_calibration_testcases.csv   similarity pairs, text_a       [doc]
+                                        similarity pairs, text_b       [doc]
   coverage_top1_top4_top5.xlsx          Comparison sheet Question      [query]
                                         Comparison sheet Expected      [doc]
 """
@@ -175,13 +176,15 @@ def discover_inputs():
     if os.path.exists(calib_p):
         with open(calib_p, encoding="utf-8-sig") as f:
             rows = list(csv.DictReader(f))
-        ids, texts = [], []
-        for r in rows:
-            # Both sides of a pair are plain statements, so both are documents;
-            # a prefix on one side only would skew that pair's cosine.
-            ids += [f"{r['pair_id']}__a", f"{r['pair_id']}__b"]
-            texts += [nfc(r["text_a"]), nfc(r["text_b"])]
-        found["calibration"] = {"ids": ids, "texts": texts, "kind": "doc"}
+        # One file per column, sharing the pair_id order, so scoring a pair is a
+        # row-wise dot product of the two matrices instead of de-interleaving one.
+        # Both sides are plain statements, hence both encoded as documents: a
+        # prefix on one side only would skew that pair's cosine.
+        ids = [r["pair_id"] for r in rows]
+        found["calibration_a"] = {"ids": ids, "kind": "doc",
+                                  "texts": [nfc(r["text_a"]) for r in rows]}
+        found["calibration_b"] = {"ids": ids, "kind": "doc",
+                                  "texts": [nfc(r["text_b"]) for r in rows]}
 
     # Excel leaves a ~$ lock file behind while the workbook is open; skip it.
     cov_p = os.path.join(d, "coverage_top1_top4_top5.xlsx")
@@ -352,9 +355,10 @@ def main():
     ap.add_argument("--model", default="all", choices=["all", *MODELS])
     ap.add_argument("--mode", default="all", choices=["all", *MODES])
     ap.add_argument("--input", default="all",
-                    choices=["all", "corpus", "queries", "calibration",
+                    choices=["all", "corpus", "queries",
+                             "calibration_a", "calibration_b", "calibration",
                              "coverage_questions", "coverage_expected", "coverage"],
-                    help="'coverage' means both coverage_questions and coverage_expected")
+                    help="'calibration' and 'coverage' each mean both of their halves")
     ap.add_argument("--batch-size", type=int, default=32)
     ap.add_argument("--fp32", dest="fp16", action="store_false", default=True,
                     help="full precision; slower and needs more VRAM")
@@ -371,15 +375,16 @@ def main():
     available = discover_inputs()
     if args.input == "all":
         inputs = available
-    elif args.input == "coverage":
-        inputs = {k: v for k, v in available.items() if k.startswith("coverage_")}
+    elif args.input in ("coverage", "calibration"):
+        inputs = {k: v for k, v in available.items()
+                  if k.startswith(args.input + "_")}
     else:
         inputs = {k: v for k, v in available.items() if k == args.input}
     if not inputs:
         raise SystemExit(f"nothing to embed for --input {args.input} "
                          f"(found: {', '.join(available) or 'none'})")
 
-    all_names = ("corpus", "queries", "calibration",
+    all_names = ("corpus", "queries", "calibration_a", "calibration_b",
                  "coverage_questions", "coverage_expected")
     print("\ninputs found:")
     for name, d in inputs.items():

@@ -96,14 +96,19 @@ embeddings/
   <model>/
     manifest.json              dims, load time, timings, prompts, per-text sha256
     no_instruct/
-      corpus.npy    ids.json           ordered by data/bench_ids.json
-      queries.npy   ids_queries.json
-      calibration.npy            ids_calibration.json
+      corpus.npy                 ids.json              ordered by bench_ids.json
+      queries.npy                ids_queries.json
+      calibration_a.npy          ids_calibration_a.json
+      calibration_b.npy          ids_calibration_b.json
       coverage_questions.npy     ids_coverage_questions.json
       coverage_expected.npy      ids_coverage_expected.json
     instruct/
       ... same file names ...
 ```
+
+Each two-column source becomes two matrices that share an id order, never one
+interleaved matrix, so comparing the two sides of a case or pair is a row-wise dot
+product: `(A * B).sum(axis=1)`.
 
 `ada002` and `text3large` have a `no_instruct/` directory only: the OpenAI embedding
 API takes no instruction. Every matrix is float32 and L2-normalized, so cosine is a
@@ -113,7 +118,8 @@ plain dot product, and row *i* is the same item across every model and mode.
 |---|---|---|---|
 | `corpus` | `corpus.jsonl`, ordered by `bench_ids.json` | 2,038 | document |
 | `queries` | `queries.jsonl` | golden set | **query** |
-| `calibration` | CSV, `text_a` + `text_b` per pair | 40 | document |
+| `calibration_a` | CSV, `text_a` column | 20 | document |
+| `calibration_b` | CSV, `text_b` column | 20 | document |
 | `coverage_questions` | xlsx `Comparison`, `Question` column | 60 | **query** |
 | `coverage_expected` | xlsx `Comparison`, `Expected` column | 60 | document |
 
