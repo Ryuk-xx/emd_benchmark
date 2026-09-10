@@ -22,8 +22,8 @@ runs once and the result is written to both, and the summary says so.
 Inputs are discovered under data/, and anything absent is reported and skipped:
   corpus.jsonl                          the chunks being searched      [doc]
   queries.jsonl                         golden-set questions           [query]
-  embedding_calibration_testcases.csv   similarity pairs, text_a       [doc]
-                                        similarity pairs, text_b       [doc]
+  embedding_calibration_testcases.csv   similarity pairs, text_a       [query]
+                                        similarity pairs, text_b       [query]
   coverage_top1_top4_top5.xlsx          Comparison sheet Question      [query]
                                         Comparison sheet Expected      [doc]
 """
@@ -179,14 +179,16 @@ def discover_inputs():
         # One file per column, sharing the pair_id order, so scoring a pair is a
         # row-wise dot product of the two matrices instead of de-interleaving one.
         #
-        # Side A is treated as the query and side B as the passage, mirroring how
-        # these pairs behave in retrieval. If both were documents the instruction
-        # prefix would apply to neither, and the instruct/no_instruct comparison
-        # would be identical by construction rather than informative.
+        # This is a symmetric similarity test, not retrieval, so BOTH sides get the
+        # same treatment in a given mode: bare in no_instruct, prefixed in instruct.
+        # Prefixing only one side would offset every cosine in the instruct column
+        # by however far the prefix moves a vector, and that artefact would swamp
+        # the thing being measured. Keeping them symmetric also preserves the T0
+        # sanity pair reading 1.0 in both modes.
         ids = [r["pair_id"] for r in rows]
         found["calibration_a"] = {"ids": ids, "kind": "query",
                                   "texts": [nfc(r["text_a"]) for r in rows]}
-        found["calibration_b"] = {"ids": ids, "kind": "doc",
+        found["calibration_b"] = {"ids": ids, "kind": "query",
                                   "texts": [nfc(r["text_b"]) for r in rows]}
 
     # Excel leaves a ~$ lock file behind while the workbook is open; skip it.

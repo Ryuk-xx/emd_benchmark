@@ -6,6 +6,11 @@ checks whether the tier ladder comes out in the intended order.
   python src/score_calibration.py
   python src/score_calibration.py --models qwen3_0.6b vn_embedding
 
+Both sides of a pair get identical treatment within a mode - bare in no_instruct,
+prefixed in instruct - because this is a symmetric similarity test, not retrieval.
+Prefixing one side only would offset the whole instruct column by however far the
+prefix moves a vector, and that artefact would swamp what is being measured.
+
 The number that decides deployability is the **T1 - T2 gap**: T1 pairs are the same
 fact reworded, T2 pairs are the same document with a *different attribute* (issue date
 vs effective date). A model whose T1 and T2 scores sit on top of each other will

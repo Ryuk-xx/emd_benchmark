@@ -119,7 +119,7 @@ plain dot product, and row *i* is the same item across every model and mode.
 | `corpus` | `corpus.jsonl`, ordered by `bench_ids.json` | 2,038 | document |
 | `queries` | `queries.jsonl` | golden set | **query** |
 | `calibration_a` | CSV, `text_a` column | 20 | **query** |
-| `calibration_b` | CSV, `text_b` column | 20 | document |
+| `calibration_b` | CSV, `text_b` column | 20 | **query** |
 | `coverage_questions` | xlsx `Comparison`, `Question` column | 60 | **query** |
 | `coverage_expected` | xlsx `Comparison`, `Expected` column | 60 | document |
 
@@ -147,11 +147,12 @@ python src/evaluate.py --models ada002 qwen3_0.6b/instruct qwen3_0.6b/no_instruc
 python src/score_calibration.py            # -> results/calibration_report.xlsx
 ```
 
-Side A is encoded as a query and side B as a passage, mirroring retrieval. Were both
-documents, neither would take the instruction prefix and the instruct/no_instruct
-columns would be identical by construction rather than informative. The cost is that
-the T0 sanity pair no longer reads ~1.0 in `instruct` mode: the prefix on one side
-alone shifts the vector, and how far it shifts is itself worth seeing.
+Both sides of a pair get the same treatment within a mode: bare in `no_instruct`,
+prefixed in `instruct`. This is a symmetric similarity test, not retrieval. Prefixing
+one side only would offset every cosine in the instruct column by however far the
+prefix moves a vector, and that artefact would swamp the discrimination being measured;
+it would also stop the T0 sanity pair reading 1.0. Kept symmetric, T0 is 1.0 in both
+modes and the two columns are directly comparable.
 
 The workbook has four sheets: `per_pair` (cosine per pair per model/mode, beside the
 texts), `by_tier` (means down the ladder), `diagnostics` and `instruct_effect`.
