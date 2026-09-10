@@ -75,15 +75,28 @@ def diagnostics(tiers, cos):
     t4 = m.get("4_unrelated")
     t5 = m.get("5_vocab_gap")
 
+    t3 = m.get("3_same_topic_diff_entity")
     present = [t for t in TIER_ORDER if t in m]
     ladder_ok = all(m[a] >= m[b] for a, b in zip(present, present[1:]))
+
+    def gt(x, y):
+        return None if None in (x, y) else bool(x > y)
 
     d = {
         "sanity_T0": m.get("0_sanity_identical"),
         "T1_paraphrase": t1,
-        "T2_same_doc_other_attribute": t2,
         "T5_vocab_gap": t5,
+        "T2_same_doc_other_attribute": t2,
+        "T3_same_topic_diff_entity": t3,
         "T4_unrelated": t4,
+        # Each rung of the ladder checked on its own, so a failure names itself
+        # instead of collapsing into one boolean.
+        "ok_T1_above_T2": gt(t1, t2),
+        # The rung that matters most in production: a differently-worded correct
+        # passage must outrank a same-document wrong-attribute one.
+        "ok_T5_above_T2": gt(t5, t2),
+        "ok_T2_above_T3": gt(t2, t3),
+        "ok_T3_above_T4": gt(t3, t4),
         # The decisive separation, and the same distance as a share of the model's
         # own usable range, which is what makes it comparable across models.
         "gap_T1_minus_T2": None if None in (t1, t2) else t1 - t2,
@@ -193,6 +206,8 @@ def main():
             v = ws.cell(r, c).value
             if metric == "gap_T1_minus_T2" and isinstance(v, float) and v < 0.05:
                 ws.cell(r, c).fill = warn_fill
+            if str(metric).startswith("ok_") and v is False:
+                ws.cell(r, c).fill = warn_fill
             if metric == "ladder_in_order" and v is False:
                 ws.cell(r, c).fill = warn_fill
     autosize(ws, 42)
@@ -222,15 +237,19 @@ def main():
     wb.save(args.out)
 
     # --- console summary ----------------------------------------------------
-    print(f"\n{'model/mode':<30}{'T1':>8}{'T2':>8}{'T1-T2':>8}{'T4':>8}"
-          f"{'spread':>9}  ladder")
+    print(f"\n{'model/mode':<28}{'T0':>7}{'T1':>7}{'T5':>7}{'T2':>7}{'T3':>7}"
+          f"{'T4':>7}{'T1-T2':>8}")
     for k, d in diags.items():
-        g = d["gap_T1_minus_T2"]
-        print(f"{k:<30}{d['T1_paraphrase']:>8.3f}"
-              f"{d['T2_same_doc_other_attribute']:>8.3f}"
-              f"{g:>8.3f}{d['T4_unrelated']:>8.3f}{d['cos_spread']:>9.3f}"
-              f"  {'ok' if d['ladder_in_order'] else 'BROKEN'}"
-              + ("   <- T1/T2 not separable" if g is not None and g < 0.05 else ""))
+        print(f"{k:<28}{d['sanity_T0']:>7.3f}{d['T1_paraphrase']:>7.3f}"
+              f"{d['T5_vocab_gap']:>7.3f}{d['T2_same_doc_other_attribute']:>7.3f}"
+              f"{d['T3_same_topic_diff_entity']:>7.3f}{d['T4_unrelated']:>7.3f}"
+              f"{d['gap_T1_minus_T2']:>8.3f}")
+
+    print("\nrung checks (False = the ladder failed at that step)")
+    rungs = [k for k in next(iter(diags.values())) if k.startswith("ok_")]
+    print(f"{'model/mode':<28}" + "".join(f"{r[3:]:>18}" for r in rungs))
+    for k, d in diags.items():
+        print(f"{k:<28}" + "".join(f"{str(d[r]):>18}" for r in rungs))
     print(f"\nreport -> {os.path.relpath(args.out, ROOT)}")
 
 

@@ -342,7 +342,19 @@ def run_model(model_name, cfg, inputs, modes, args):
 
     man_dir = os.path.join(ROOT, "embeddings", model_name)
     os.makedirs(man_dir, exist_ok=True)
-    with open(os.path.join(man_dir, "manifest.json"), "w", encoding="utf-8") as f:
+    man_path = os.path.join(man_dir, "manifest.json")
+
+    # Merge per input, not per file: re-running one --input must not erase the
+    # record of vectors written by an earlier run that are still on disk.
+    if os.path.exists(man_path):
+        with open(man_path, encoding="utf-8") as f:
+            old = json.load(f)
+        for mode, per_input in old.get("modes", {}).items():
+            merged = dict(per_input)
+            merged.update(entry["modes"].get(mode, {}))
+            entry["modes"][mode] = merged
+
+    with open(man_path, "w", encoding="utf-8") as f:
         json.dump({"model": model_name, **entry, "dtype": "float32",
                    "already_l2_normalized": True}, f, ensure_ascii=False)
 
