@@ -71,6 +71,17 @@ MODELS = {
         "query_instruction": f"Instruct: {QWEN_TASK}\nQuery: ",
         "doc_instruction": None,       # Qwen3 defines no document-side prefix
     },
+    "qwen3_vl_2b": {
+        "hf_id": "Qwen/Qwen3-VL-Embedding-2B",
+        "max_seq_length": 2048,        # model supports 32k; the corpus never needs it
+        # This model takes a plain instruction sentence, NOT the
+        # "Instruct: ...\nQuery: " template that Qwen3-Embedding uses. It also wraps
+        # every input in a default "Represent the user's input." system prompt, so
+        # its no_instruct mode is "model default", not "no instruction at all" -
+        # the one model here for which the two modes are not bare-vs-prefixed.
+        "query_instruction": QWEN_TASK + ".",
+        "doc_instruction": None,
+    },
 }
 
 

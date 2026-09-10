@@ -2,6 +2,6 @@
 #   pip install torch --index-url https://download.pytorch.org/whl/cu121
 #   pip install -r requirements-gpu.txt
 sentence-transformers>=3.0.0
-transformers>=4.51.0
+transformers>=4.57.0    # Qwen3-VL-Embedding-2B needs this
 numpy>=1.24
 openpyxl>=3.1          # reads data/coverage_top1_top4_top5.xlsx

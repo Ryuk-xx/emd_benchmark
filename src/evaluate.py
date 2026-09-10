@@ -220,6 +220,7 @@ def main():
         "ada002", "text3large",
         "vn_embedding/no_instruct", "vn_embedding/instruct",
         "qwen3_0.6b/no_instruct", "qwen3_0.6b/instruct",
+        "qwen3_vl_2b/no_instruct", "qwen3_vl_2b/instruct",
     ])
     ap.add_argument("--topk", type=int, default=100)
     ap.add_argument("--primary", default="ndcg@10")

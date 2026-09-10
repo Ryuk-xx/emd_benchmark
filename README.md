@@ -8,6 +8,7 @@ Comparing four embedding models on a Viettel telecom RAG corpus:
 | `text3large` — text-embedding-3-large | 3072 | already embedded, pulled from Neo4j |
 | `vn_embedding` — AITeamVN/Vietnamese_Embedding | 1024 | GPU machine |
 | `qwen3_0.6b` — Qwen/Qwen3-Embedding-0.6B | 1024 | GPU machine |
+| `qwen3_vl_2b` — Qwen/Qwen3-VL-Embedding-2B | 2048 | GPU machine |
 
 ## Rule: Neo4j is read-only
 

@@ -156,8 +156,9 @@ def autosize(ws, limits):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--models", nargs="+", default=["qwen3_0.6b", "vn_embedding",
-                                                    "ada002", "text3large"])
+    ap.add_argument("--models", nargs="+",
+                    default=["qwen3_0.6b", "qwen3_vl_2b", "vn_embedding",
+                             "ada002", "text3large"])
     ap.add_argument("--modes", nargs="+", default=["no_instruct", "instruct"])
     ap.add_argument("--out", default=os.path.join(R, "calibration_report.xlsx"))
     ap.add_argument("--extra", nargs="*", default=["text3large=" + os.path.join(
