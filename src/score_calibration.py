@@ -59,11 +59,42 @@ def load_cosines(model, mode, pair_ids):
     return (A * B).sum(axis=1)
 
 
+def load_extra_scores(path, pairs):
+    """Read pre-computed cosines from a CSV of pair_id,cosine.
+
+    Rows whose pair_id is not in the calibration set are ignored, which is how the
+    trailing '=== SUMMARY ===' block in results_detail_v1_pairs.csv is skipped.
+    Where the file carries text_a/text_b they are checked against the calibration
+    file, so a score can never be attached to a pair it was not computed on.
+    """
+    by_pair = {p["pair_id"]: p for p in pairs}
+    with open(path, encoding="utf-8-sig") as f:
+        rows = list(csv.DictReader(f))
+    by_id = {r["pair_id"]: r for r in rows if r.get("pair_id") in by_pair}
+
+    mismatched = [
+        pid for pid, r in by_id.items()
+        if any(r.get(k) is not None and r[k].strip() != by_pair[pid][k].strip()
+               for k in ("text_a", "text_b"))
+    ]
+    if mismatched:
+        raise SystemExit(
+            f"{os.path.basename(path)}: text differs from the calibration file for "
+            f"{len(mismatched)} pairs ({', '.join(mismatched[:5])}). These scores "
+            f"were computed on different text and must not be merged.")
+
+    missing = [p for p in by_pair if p not in by_id]
+    if missing:
+        print(f"  {os.path.basename(path)}: no score for {len(missing)} pairs "
+              f"({', '.join(missing[:5])}) - left blank")
+    return by_id
+
+
 def tier_means(tiers, cos):
     out = {}
     for t in sorted(set(tiers)):
         v = np.array([c for c, tt in zip(cos, tiers) if tt == t])
-        out[t] = float(v.mean())
+        out[t] = float(np.nanmean(v)) if np.any(~np.isnan(v)) else None
     return out
 
 
@@ -102,9 +133,9 @@ def diagnostics(tiers, cos):
         "gap_T1_minus_T2": None if None in (t1, t2) else t1 - t2,
         "gap_T1_minus_T4": None if None in (t1, t4) else t1 - t4,
         "ladder_in_order": ladder_ok,
-        "cos_min": float(np.min(cos)),
-        "cos_max": float(np.max(cos)),
-        "cos_spread": float(np.max(cos) - np.min(cos)),
+        "cos_min": float(np.nanmin(cos)),
+        "cos_max": float(np.nanmax(cos)),
+        "cos_spread": float(np.nanmax(cos) - np.nanmin(cos)),
     }
     if d["gap_T1_minus_T2"] is not None and d["cos_spread"] > 0:
         d["gap_T1_T2_as_pct_of_spread"] = 100 * d["gap_T1_minus_T2"] / d["cos_spread"]
@@ -124,6 +155,9 @@ def main():
                                                     "ada002", "text3large"])
     ap.add_argument("--modes", nargs="+", default=["no_instruct", "instruct"])
     ap.add_argument("--out", default=os.path.join(R, "calibration_report.xlsx"))
+    ap.add_argument("--extra", nargs="*", default=["text3large=" + os.path.join(
+        D, "results_detail_v1_pairs.csv")],
+        help="label=path.csv of pre-computed pair_id,cosine scores to include")
     args = ap.parse_args()
 
     try:
@@ -147,6 +181,16 @@ def main():
             cols[f"{model}/{mode}"] = cos
             print(f"  {model}/{mode}: scored")
 
+    for spec in args.extra or []:
+        label, _, path = spec.partition("=")
+        if not os.path.exists(path):
+            print(f"  {label}: {os.path.relpath(path, ROOT)} not found, skipped")
+            continue
+        by_id = load_extra_scores(path, pairs)
+        vals = [by_id[p]["cosine"] if p in by_id else "" for p in pair_ids]
+        cols[label] = np.array([float(v) if v != "" else np.nan for v in vals])
+        print(f"  {label}: loaded from {os.path.relpath(path, ROOT)}")
+
     if not cols:
         raise SystemExit("no model/mode has calibration vectors yet - "
                          "run src/embed_local.py first")
@@ -165,7 +209,8 @@ def main():
     for i, p in enumerate(pairs):
         ws.append([p["pair_id"], p["tier"], p.get("expected_relation", ""),
                    p.get("risk_note", ""), p["text_a"], p["text_b"]]
-                  + [round(float(c[i]), 4) for c in cols.values()])
+                  + [None if np.isnan(c[i]) else round(float(c[i]), 4)
+                     for c in cols.values()])
     for c in ws[1]:
         c.font, c.fill = bold, head_fill
     ws.freeze_panes = "A2"
@@ -180,7 +225,7 @@ def main():
         row = [t, counts[t]]
         for c in cols.values():
             v = np.array([x for x, tt in zip(c, tiers) if tt == t])
-            row.append(round(float(v.mean()), 4))
+            row.append(round(float(np.nanmean(v)), 4) if np.any(~np.isnan(v)) else "")
         ws.append(row)
     for c in ws[1]:
         c.font, c.fill = bold, head_fill
@@ -249,7 +294,7 @@ def main():
         for i, p in enumerate(pairs):
             row = {k: p.get(k, "") for k in src_fields}
             for name, c in zip(score_fields, cols.values()):
-                row[name] = f"{float(c[i]):.4f}"
+                row[name] = "" if np.isnan(c[i]) else f"{float(c[i]):.4f}"
             w.writerow(row)
     print(f"csv    -> {os.path.relpath(csv_out, ROOT)}")
 
@@ -257,10 +302,13 @@ def main():
     print(f"\n{'model/mode':<28}{'T0':>7}{'T1':>7}{'T5':>7}{'T2':>7}{'T3':>7}"
           f"{'T4':>7}{'T1-T2':>8}")
     for k, d in diags.items():
-        print(f"{k:<28}{d['sanity_T0']:>7.3f}{d['T1_paraphrase']:>7.3f}"
-              f"{d['T5_vocab_gap']:>7.3f}{d['T2_same_doc_other_attribute']:>7.3f}"
-              f"{d['T3_same_topic_diff_entity']:>7.3f}{d['T4_unrelated']:>7.3f}"
-              f"{d['gap_T1_minus_T2']:>8.3f}")
+        def f(x):
+            return f"{x:>7.3f}" if isinstance(x, float) else f"{'-':>7}"
+        print(f"{k:<28}" + f(d['sanity_T0']) + f(d['T1_paraphrase'])
+              + f(d['T5_vocab_gap']) + f(d['T2_same_doc_other_attribute'])
+              + f(d['T3_same_topic_diff_entity']) + f(d['T4_unrelated'])
+              + (f"{d['gap_T1_minus_T2']:>8.3f}"
+                 if isinstance(d['gap_T1_minus_T2'], float) else f"{'-':>8}"))
 
     print("\nrung checks (False = the ladder failed at that step)")
     rungs = [k for k in next(iter(diags.values())) if k.startswith("ok_")]
