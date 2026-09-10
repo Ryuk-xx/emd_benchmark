@@ -164,6 +164,10 @@ def main():
     ap.add_argument("--extra", nargs="*", default=["text3large=" + os.path.join(
         D, "results_detail_v1_pairs.csv")],
         help="label=path.csv of pre-computed pair_id,cosine scores to include")
+    # vn_embedding/instruct by default: that model defines no instruction of its own,
+    # so any vectors still on disk under that name are from a superseded run.
+    ap.add_argument("--exclude", nargs="*", default=["vn_embedding/instruct"],
+                    help="model/mode pairs to leave out of the report")
     args = ap.parse_args()
 
     try:
@@ -178,8 +182,12 @@ def main():
     print(f"{len(pairs)} calibration pairs from {os.path.basename(CSV_PATH)}")
 
     cols = {}                                    # "model/mode" -> cosine array
+    excluded = set(args.exclude or [])
     for model in args.models:
         for mode in args.modes:
+            if f"{model}/{mode}" in excluded:
+                print(f"  {model}/{mode}: excluded")
+                continue
             cos = load_cosines(model, mode, pair_ids)
             if cos is None:
                 print(f"  {model}/{mode}: no vectors, skipped")
