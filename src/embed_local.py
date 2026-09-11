@@ -151,7 +151,7 @@ def load_coverage_xlsx(path):
     return ids, questions, expected
 
 
-def discover_inputs():
+def discover_inputs(coverage_file=None, coverage_name="coverage"):
     """Collect whichever inputs exist. 'kind' decides whether a prompt applies."""
     d = os.path.join(ROOT, "data")
     found = {}
@@ -203,16 +203,17 @@ def discover_inputs():
                                   "texts": [nfc(r["text_b"]) for r in rows]}
 
     # Excel leaves a ~$ lock file behind while the workbook is open; skip it.
-    cov_p = os.path.join(d, "coverage_top1_top4_top5.xlsx")
+    cov_p = coverage_file or os.path.join(d, "coverage_top1_top4_top5.xlsx")
     if os.path.exists(cov_p) and not os.path.basename(cov_p).startswith("~$"):
         got = load_coverage_xlsx(cov_p)
         if got:
             case_ids, questions, expected = got
             # Split by kind, keeping the same Case order in both, so row i is the
             # same case in each file.
-            found["coverage_questions"] = {
+            suffix = "" if coverage_name == "coverage" else f"_{coverage_name}"
+            found[f"coverage_questions{suffix}"] = {
                 "ids": case_ids, "texts": questions, "kind": "query"}
-            found["coverage_expected"] = {
+            found[f"coverage_expected{suffix}"] = {
                 "ids": case_ids, "texts": expected, "kind": "doc"}
 
     return found
@@ -390,6 +391,10 @@ def main():
                              "calibration_a", "calibration_b", "calibration",
                              "coverage_questions", "coverage_expected", "coverage"],
                     help="'calibration' and 'coverage' each mean both of their halves")
+    ap.add_argument("--coverage-file", default=None,
+                    help="coverage workbook path; defaults to data/coverage_top1_top4_top5.xlsx")
+    ap.add_argument("--coverage-name", default="coverage",
+                    help="output prefix for a custom coverage workbook (default: coverage)")
     ap.add_argument("--batch-size", type=int, default=32)
     ap.add_argument("--fp32", dest="fp16", action="store_false", default=True,
                     help="full precision; slower and needs more VRAM")
@@ -403,7 +408,7 @@ def main():
     if args.device == "cpu":
         print("  no GPU detected - this will work but take much longer")
 
-    available = discover_inputs()
+    available = discover_inputs(args.coverage_file, args.coverage_name)
     if args.input == "all":
         inputs = available
     elif args.input in ("coverage", "calibration"):
