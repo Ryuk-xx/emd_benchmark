@@ -180,6 +180,25 @@ Gaps under 0.05 and a broken ladder are highlighted in red.
 
 ## What the report shows
 
+### Coverage top-5 retrieval
+
+To retrieve the five highest-scoring chunks for every question in
+`coverage_top1_top4_top5.xlsx`, run:
+
+```bash
+python src/retrieve_coverage_top5.py
+```
+
+The command processes `qwen3_0.6b` and `vn_embedding` in both modes, prefers CUDA
+when PyTorch reports a GPU, and falls back to CPU otherwise. Results are written to
+`results/coverage_top5.csv`, one row per question/model/mode/rank, with the chunk
+ID, cosine score, chunk metadata, embedding timings from `manifest.json`, and
+retrieval timing. To force CPU or choose a different output file:
+
+```bash
+python src/retrieve_coverage_top5.py --device cpu --output results/coverage_top5_cpu.csv
+```
+
 - **nDCG@10, Recall@{1,5,10,50}, MRR@10** with bootstrap 95% CIs.
   If a reranker sits downstream, read Recall@50, not nDCG@10.
 - **BM25 and an RRF hybrid** in every table. A dense model that cannot beat BM25 on this
