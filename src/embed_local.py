@@ -26,6 +26,8 @@ Inputs are discovered under data/, and anything absent is reported and skipped:
                                         similarity pairs, text_b       [query]
   coverage_top1_top4_top5.xlsx          Comparison sheet Question      [query]
                                         Comparison sheet Expected      [doc]
+  chunk_va_fact_500_bai.xlsx            facts per chunk, joined to the [query]
+                                        corpus by chunk id
 """
 import argparse
 import csv
@@ -59,6 +61,7 @@ MODELS = {
     "vn_embedding": {
         "hf_id": "AITeamVN/Vietnamese_Embedding",
         "max_seq_length": 2048,
+        "max_seq_length_cap": 2048,    # the model card's limit; longer inputs truncate
         # This model descends from BGE-M3, which was never trained with instructions,
         # so it has no prefix to apply. query_instruction=None means the instruct mode
         # is skipped for it entirely rather than duplicating the bare vectors.
@@ -67,13 +70,15 @@ MODELS = {
     },
     "qwen3_0.6b": {
         "hf_id": "Qwen/Qwen3-Embedding-0.6B",
-        "max_seq_length": 2048,        # corpus max is 1,201 tokens, so nothing is cut
+        "max_seq_length": 2048,        # default; an input may ask for more, up to the cap
+        "max_seq_length_cap": 32768,
         "query_instruction": f"Instruct: {QWEN_TASK}\nQuery: ",
         "doc_instruction": None,       # Qwen3 defines no document-side prefix
     },
     "qwen3_vl_2b": {
         "hf_id": "Qwen/Qwen3-VL-Embedding-2B",
-        "max_seq_length": 2048,        # model supports 32k; the corpus never needs it
+        "max_seq_length": 2048,        # default; an input may ask for more, up to the cap
+        "max_seq_length_cap": 32768,
         # This model takes a plain instruction sentence, NOT the
         # "Instruct: ...\nQuery: " template that Qwen3-Embedding uses. It also wraps
         # every input in a default "Represent the user's input." system prompt, so
@@ -216,7 +221,70 @@ def discover_inputs(coverage_file=None, coverage_name="coverage"):
             found[f"coverage_expected{suffix}"] = {
                 "ids": case_ids, "texts": expected, "kind": "doc"}
 
+    fact_p = os.path.join(d, "chunk_va_fact_500_bai.xlsx")
+    if os.path.exists(fact_p):
+        got = load_fact_xlsx(fact_p, found.get("corpus", {}).get("ids"))
+        if got:
+            ids, texts = got
+            # A fact block is a probe against the corpus - "which chunk did these
+            # facts come from?" - so it is query-kind and takes the prefix in
+            # instruct mode, the way a retrieval query would. Fact blocks run to
+            # ~9k tokens, far past the 2048 default, so this input asks for a
+            # longer window; each model clamps it to its own cap.
+            found["fact"] = {"ids": ids, "texts": texts, "kind": "query",
+                             "max_seq_length": 8192}
+
     return found
+
+
+def load_fact_xlsx(path, corpus_order=None):
+    """Read the 'Chunk và fact' sheet: one row per chunk, its facts concatenated.
+
+    Returns (chunk_ids, fact_texts) with chunk_id = "<doc_id>::<chunk>", the same key
+    the corpus uses, so a fact row joins to its source chunk by id. Rows are put in
+    bench_ids order when the corpus is present, so corpus[idx] lines up directly.
+    """
+    try:
+        import openpyxl
+    except ImportError:
+        print("  fact xlsx found but openpyxl is not installed - skipping")
+        return None
+    wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+    sheet = "Chunk và fact" if "Chunk và fact" in wb.sheetnames else wb.sheetnames[0]
+    rows = list(wb[sheet].iter_rows(values_only=True))
+    wb.close()
+    if not rows:
+        return None
+
+    header = [str(c).strip().lower() if c is not None else "" for c in rows[0]]
+    i_doc = next((i for i, h in enumerate(header) if h == "doc_id"), None)
+    i_chunk = next((i for i, h in enumerate(header) if h == "chunk"), None)
+    i_fact = next((i for i, h in enumerate(header) if "f.text" in h), None)
+    if None in (i_doc, i_chunk, i_fact):
+        print(f"  {os.path.basename(path)}: sheet '{sheet}' lacks "
+              f"doc_id / chunk / (f.text) columns - skipping")
+        return None
+
+    recs = {}
+    for r in rows[1:]:
+        if not any(r) or r[i_doc] is None or not r[i_fact]:
+            continue
+        chunk = 0 if r[i_chunk] in (None, "") else int(r[i_chunk])
+        cid = f"{int(r[i_doc])}::{chunk}"
+        if cid in recs:
+            raise SystemExit(f"{os.path.basename(path)}: duplicate chunk id {cid}")
+        recs[cid] = nfc(r[i_fact])
+
+    if corpus_order:
+        pos = {c: i for i, c in enumerate(corpus_order)}
+        unknown = [c for c in recs if c not in pos]
+        if unknown:
+            print(f"  fact: {len(unknown)} rows have no matching corpus chunk "
+                  f"(e.g. {unknown[:3]}) - dropped")
+        ids = sorted((c for c in recs if c in pos), key=pos.__getitem__)
+    else:
+        ids = list(recs)
+    return ids, [recs[c] for c in ids]
 
 
 def encode_timed(model, texts, prompt, batch_size, device):
@@ -291,10 +359,20 @@ def run_model(model_name, cfg, inputs, modes, args):
 
     for input_name, data in inputs.items():
         texts, ids, kind = data["texts"], data["ids"], data["kind"]
+
+        # An input may ask for a longer window than the default; the model's own
+        # cap wins. Longer windows mean bigger activations, so the batch shrinks.
+        seq = min(data.get("max_seq_length", cfg["max_seq_length"]),
+                  cfg.get("max_seq_length_cap", cfg["max_seq_length"]))
+        model.max_seq_length = seq
+        batch = args.batch_size if seq <= 2048 else max(1, args.batch_size // 4)
+
         n_tok = [len(model.tokenizer.encode(t, add_special_tokens=True)) for t in texts]
-        truncated = int(sum(n > cfg["max_seq_length"] for n in n_tok))
+        truncated = int(sum(n > seq for n in n_tok))
         print(f"  -- {input_name} [{kind}]: {len(texts)} items, "
-              f"{sum(n_tok):,} tokens, max {max(n_tok)}, truncated {truncated}")
+              f"{sum(n_tok):,} tokens, max {max(n_tok)}, "
+              f"window {seq}, truncated {truncated}"
+              + (f", batch {batch}" if batch != args.batch_size else ""))
 
         done_by_prompt = {}          # prompt -> (mode already encoded)
         for mode in modes:
@@ -318,14 +396,14 @@ def run_model(model_name, cfg, inputs, modes, args):
                 continue
 
             print(f"     {mode:12s} prompt={prompt!r}")
-            X, batch_times = encode_timed(model, texts, prompt, args.batch_size, device)
+            X, batch_times = encode_timed(model, texts, prompt, batch, device)
             total = sum(batch_times)
             lat = measure_latency(model, texts, prompt, device)
             write_vectors(out_dir, input_name, X, ids)
 
             entry["modes"].setdefault(mode, {})[input_name] = {
                 "n": len(texts), "shape": list(X.shape), "kind": kind,
-                "prompt": prompt,
+                "prompt": prompt, "max_seq_length": seq, "batch_size": batch,
                 "tokens_total": int(sum(n_tok)), "tokens_max": int(max(n_tok)),
                 "tokens_truncated": truncated,
                 "encode_seconds": round(total, 2),
@@ -389,7 +467,8 @@ def main():
     ap.add_argument("--input", default="all",
                     choices=["all", "corpus", "queries",
                              "calibration_a", "calibration_b", "calibration",
-                             "coverage_questions", "coverage_expected", "coverage"],
+                             "coverage_questions", "coverage_expected", "coverage",
+                             "fact"],
                     help="'calibration' and 'coverage' each mean both of their halves")
     ap.add_argument("--coverage-file", default=None,
                     help="coverage workbook path; defaults to data/coverage_top1_top4_top5.xlsx")
@@ -421,7 +500,7 @@ def main():
                          f"(found: {', '.join(available) or 'none'})")
 
     all_names = ("corpus", "queries", "calibration_a", "calibration_b",
-                 "coverage_questions", "coverage_expected")
+                 "coverage_questions", "coverage_expected", "fact")
     print("\ninputs found:")
     for name, d in inputs.items():
         chars = sum(len(t) for t in d["texts"])

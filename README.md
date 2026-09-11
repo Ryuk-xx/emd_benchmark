@@ -68,6 +68,7 @@ data/bench_ids.json                        the row order every matrix must follo
 data/queries.jsonl                         once the golden set exists
 data/embedding_calibration_testcases.csv   optional, similarity-calibration pairs
 data/coverage_top1_top4_top5.xlsx          optional, 60 Question/Expected cases
+data/chunk_va_fact_500_bai.xlsx            optional, facts per chunk (1,862 rows)
 ```
 
 Everything under `data/` is picked up automatically; anything absent is reported and
@@ -136,11 +137,25 @@ plain dot product, and row *i* is the same item across every model and mode.
 | `calibration_b` | CSV, `text_b` column | 20 | **query** |
 | `coverage_questions` | xlsx `Comparison`, `Question` column | 60 | **query** |
 | `coverage_expected` | xlsx `Comparison`, `Expected` column | 60 | document |
+| `fact` | xlsx `Chunk và fact`, `CÁC FACT SINH RA TỪ CHUNK NÀY (f.text)` | 1,862 | **query** |
 
 The coverage sheet is split in two on purpose. A question is a query and takes the
 instruction prefix; an expected answer is a statement and must not, or the two sides of
 the same case are not comparable. Both files keep the `Case` order, so row *i* is the
 same case in each.
+
+`fact` is one row per chunk holding every fact extracted from it, keyed
+`<doc_id>::<chunk>` — the corpus's own chunk id — and written in `bench_ids` order, so
+`ids_fact.json` joins straight to `corpus.npy`. It is query-kind because a fact block is
+a probe against the corpus ("which chunk did these come from?"), so it takes the prefix
+in `instruct` mode the way a retrieval query would.
+
+Fact blocks are long: p50 ≈ 1k tokens, max ≈ 9k. They ask for an **8192-token window**
+rather than the 2048 default, and each model clamps that to its own cap — 32k for both
+Qwen models, so nothing is cut; 2048 for `vn_embedding`, whose model card stops there,
+so roughly a fifth of its fact rows are truncated. The manifest records the window and
+the truncated count per input; read them before comparing `vn_embedding` on this input.
+Long windows also shrink the batch to a quarter of `--batch-size` to stay inside VRAM.
 
 Copy `embeddings/vn_embedding/`, `embeddings/qwen3_0.6b/` and `embeddings/qwen3_vl_2b/`
 back here to score.
