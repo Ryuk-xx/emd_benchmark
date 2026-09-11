@@ -70,14 +70,14 @@ MODELS = {
     },
     "qwen3_0.6b": {
         "hf_id": "Qwen/Qwen3-Embedding-0.6B",
-        "max_seq_length": 2048,        # default; an input may ask for more, up to the cap
+        "max_seq_length": 4096,        # default; an input may ask for more, up to the cap
         "max_seq_length_cap": 32768,
         "query_instruction": f"Instruct: {QWEN_TASK}\nQuery: ",
         "doc_instruction": None,       # Qwen3 defines no document-side prefix
     },
     "qwen3_vl_2b": {
         "hf_id": "Qwen/Qwen3-VL-Embedding-2B",
-        "max_seq_length": 2048,        # default; an input may ask for more, up to the cap
+        "max_seq_length": 4096,        # default; an input may ask for more, up to the cap
         "max_seq_length_cap": 32768,
         # This model takes a plain instruction sentence, NOT the
         # "Instruct: ...\nQuery: " template that Qwen3-Embedding uses. It also wraps
@@ -367,7 +367,7 @@ def run_model(model_name, cfg, inputs, modes, args):
         seq = min(data.get("max_seq_length", cfg["max_seq_length"]),
                   cfg.get("max_seq_length_cap", cfg["max_seq_length"]))
         model.max_seq_length = seq
-        batch = args.batch_size if seq <= 2048 else max(1, args.batch_size // 4)
+        batch = args.batch_size if seq <= 4096 else max(1, args.batch_size // 4)
 
         n_tok = [len(model.tokenizer.encode(t, add_special_tokens=True)) for t in texts]
         truncated = int(sum(n > seq for n in n_tok))

@@ -153,7 +153,8 @@ stands for. That puts it on the document side, so like `corpus` it is encoded ba
 both modes and only the question side changes with the prefix.
 
 Fact blocks are long: p50 ≈ 1k tokens, max ≈ 9k. They ask for an **8192-token window**
-rather than the 2048 default, and each model clamps that to its own cap — 32k for both
+rather than the default (4096 for the Qwen models, 2048 for `vn_embedding`), and each
+model clamps that to its own cap — 32k for both
 Qwen models, so nothing is cut; 2048 for `vn_embedding`, whose model card stops there,
 so roughly a fifth of its fact rows are truncated. The manifest records the window and
 the truncated count per input; read them before comparing `vn_embedding` on this input.
