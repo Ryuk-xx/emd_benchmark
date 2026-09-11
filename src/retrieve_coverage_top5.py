@@ -1,24 +1,25 @@
-"""Retrieve the five most similar corpus chunks for a set of query vectors.
+"""Retrieve the five most similar index entries for the coverage questions.
 
-The query vectors and corpus vectors must already exist under
-``embeddings/<model>/<mode>/``.  The output has one row per query, model, mode,
-and rank, including chunk metadata and embedding/retrieval timings.
+The question vectors and index vectors must already exist under
+``embeddings/<model>/<mode>/``.  The output has one row per question, model,
+mode, and rank, including chunk metadata and embedding/retrieval timings.
 
-Two query sources:
+Two indexes to search, chosen with ``--index``:
 
-  coverage   the Question column of a coverage workbook (default)
-  fact       the per-chunk fact blocks from data/chunk_va_fact_500_bai.xlsx
+  corpus   the raw chunk text, ``corpus.npy`` (default)
+  fact     each chunk represented by the facts extracted from it, ``fact.npy``
 
-The fact source is special: each query *is* a chunk's own fact block, so the chunk
-it came from is known.  Those rows carry ``gold_chunk_id`` and ``is_gold``, and the
-run prints hit@1 / hit@k per model and mode - how often the source chunk is
-retrieved at all, and how often it is top-1.
+Both are keyed by chunk id, so a hit in the fact index still reports the chunk it
+stands for, plus the fact text that matched in ``fact_text``.  Comparing the two
+runs on the same questions shows whether searching over extracted facts finds the
+right chunk more often than searching over the chunk itself.
 
 Examples::
 
     python src/retrieve_coverage_top5.py
-    python src/retrieve_coverage_top5.py --query-input fact
-    python src/retrieve_coverage_top5.py --query-input fact --topk 10 --device cpu
+    python src/retrieve_coverage_top5.py --index fact
+    python src/retrieve_coverage_top5.py --index fact --coverage-name bo_sung \
+        --coverage-file data/coverage_top1_top4_top5_bo_sung_60_cau.xlsx
     python src/retrieve_coverage_top5.py --models qwen3_0.6b vn_embedding \
         --modes no_instruct instruct --output results/coverage_top5.csv
 """
@@ -169,12 +170,18 @@ def retrieve_gpu(questions, corpus, topk, batch_size):
     return np.concatenate(all_indices), np.concatenate(all_scores)
 
 
-def load_pair(model, mode, input_name):
+def load_pair(model, mode, input_name, index="corpus"):
+    """Load (index vectors, question vectors, index ids, question ids).
+
+    index="fact" searches fact.npy instead of corpus.npy; both carry chunk ids.
+    """
     directory = os.path.join(EMBEDDINGS, model, mode)
+    index_npy = "corpus.npy" if index == "corpus" else f"{index}.npy"
+    index_ids = "ids.json" if index == "corpus" else f"ids_{index}.json"
     paths = {
-        "corpus": os.path.join(directory, "corpus.npy"),
+        "corpus": os.path.join(directory, index_npy),
         "questions": os.path.join(directory, f"{input_name}.npy"),
-        "corpus_ids": os.path.join(directory, "ids.json"),
+        "corpus_ids": os.path.join(directory, index_ids),
         "question_ids": os.path.join(directory, f"ids_{input_name}.json"),
     }
     missing = [name for name, path in paths.items() if not os.path.exists(path)]
@@ -221,35 +228,26 @@ def retrieve_pair(pair, device, topk, batch_size):
 
 
 def write_pair_rows(writer, model, mode, pair_result, question_text, corpus_rows,
-                    manifest, manifest_path, device, input_name, gold_is_self=False):
-    """Write one row per (query, rank).
-
-    With gold_is_self the query id is itself a chunk id - the fact source - so the
-    chunk each query came from is known and marked; hit counts are returned too.
-    """
+                    manifest, manifest_path, device, input_name, index="corpus",
+                    fact_text=None):
     corpus_ids, question_ids, indices, scores, retrieval_seconds, topk = pair_result
     timing = embedding_timing(manifest, mode, input_name)
-    hit_at_1 = hit_at_k = 0
+    fact_text = fact_text or {}
     for question_row, question_id in enumerate(question_ids):
-        gold = question_id if gold_is_self else ""
-        found_rank = None
-        for rank, (index, score) in enumerate(
+        for rank, (index_pos, score) in enumerate(
                 zip(indices[question_row], scores[question_row]), 1):
-            chunk_id = corpus_ids[int(index)]
+            chunk_id = corpus_ids[int(index_pos)]
             chunk = corpus_rows.get(chunk_id, {})
-            is_gold = bool(gold) and chunk_id == gold
-            if is_gold and found_rank is None:
-                found_rank = rank
             writer.writerow({
                 "model": model,
                 "mode": mode,
                 "question_id": question_id,
                 "question": question_text.get(question_id, question_id),
                 "rank": rank,
+                "index": index,
                 "chunk_id": chunk_id,
                 "score": f"{float(score):.8f}",
-                "gold_chunk_id": gold,
-                "is_gold": (1 if is_gold else 0) if gold else "",
+                "fact_text": fact_text.get(chunk_id, "") if index == "fact" else "",
                 "title": chunk.get("title", ""),
                 "text": chunk.get("text", ""),
                 "doc_id": chunk.get("doc_id", ""),
@@ -260,11 +258,7 @@ def write_pair_rows(writer, model, mode, pair_result, question_text, corpus_rows
                 "retrieval_device": device,
                 "retrieval_seconds": f"{retrieval_seconds:.6f}",
             })
-        if found_rank is not None:
-            hit_at_k += 1
-            hit_at_1 += found_rank == 1
-    return (len(question_ids) * topk, len(question_ids), retrieval_seconds, topk,
-            hit_at_1, hit_at_k)
+    return len(question_ids) * topk, len(question_ids), retrieval_seconds, topk
 
 
 def main():
@@ -280,40 +274,44 @@ def main():
                         DATA, "coverage_top1_top4_top5.xlsx"))
     parser.add_argument("--coverage-name", default="coverage",
                         help="use bo_sung for coverage_questions_bo_sung.npy")
-    parser.add_argument("--query-input", choices=("coverage", "fact"), default="coverage",
-                        help="which vectors to use as queries; fact marks the source "
-                             "chunk of each query as gold and reports hit@k")
-    parser.add_argument("--fact-file", default=FACT_XLSX)
+    parser.add_argument("--index", choices=("corpus", "fact"), default="corpus",
+                        help="search the raw chunks (corpus.npy) or the per-chunk "
+                             "fact blocks (fact.npy); both are keyed by chunk id")
+    parser.add_argument("--fact-file", default=FACT_XLSX,
+                        help="workbook the fact_text column is read from")
     args = parser.parse_args()
     if args.topk < 1 or args.batch_size < 1:
         parser.error("--topk and --batch-size must be positive")
 
     device = resolve_device(args.device)
 
-    gold_is_self = args.query_input == "fact"
-    if gold_is_self:
-        input_name = "fact"
-        question_text = load_fact_text(args.fact_file)
-        if args.output == DEFAULT_OUTPUT:
-            args.output = os.path.join(ROOT, "results", f"fact_top{args.topk}.csv")
-    else:
-        input_name = "coverage_questions" if args.coverage_name == "coverage" \
-            else f"coverage_questions_{args.coverage_name}"
-        question_text = load_questions(args.coverage_file)
+    input_name = "coverage_questions" if args.coverage_name == "coverage" \
+        else f"coverage_questions_{args.coverage_name}"
+    question_text = load_questions(args.coverage_file)
+    fact_text = load_fact_text(args.fact_file) if args.index == "fact" else {}
+
+    # Derive the output name from what was searched, so a bo_sung run or a fact-
+    # index run cannot silently overwrite the default corpus run.
+    if args.output == DEFAULT_OUTPUT:
+        stem = f"coverage_top{args.topk}"
+        if args.coverage_name != "coverage":
+            stem += f"_{args.coverage_name}"
+        if args.index != "corpus":
+            stem += f"_{args.index}"
+        args.output = os.path.join(ROOT, "results", stem + ".csv")
     corpus_rows = {row["chunk_id"]: row for row in (
         json.loads(line) for line in open(os.path.join(DATA, "corpus.jsonl"), encoding="utf-8")
     )}
     os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
     fieldnames = [
-        "model", "mode", "question_id", "question", "rank", "chunk_id", "score",
-        "gold_chunk_id", "is_gold",
+        "model", "mode", "question_id", "question", "rank", "index", "chunk_id",
+        "score", "fact_text",
         "title", "text", "doc_id", "chunk_index", "businesses", "embedding_manifest",
         "embedding_corpus_seconds", "embedding_questions_seconds",
         "embedding_corpus_items_per_second", "embedding_questions_items_per_second",
         "embedding_question_prompt", "retrieval_device", "retrieval_seconds",
     ]
     total_rows = 0
-    summary = []
     with open(args.output, "w", encoding="utf-8-sig", newline="") as output:
         writer = csv.DictWriter(output, fieldnames=fieldnames)
         writer.writeheader()
@@ -321,27 +319,19 @@ def main():
             model_dir = os.path.join(EMBEDDINGS, model)
             manifest, manifest_path = get_manifest(model_dir, args.modes[0])
             for mode in args.modes:
-                pair, missing = load_pair(model, mode, input_name)
+                pair, missing = load_pair(model, mode, input_name, args.index)
                 if pair is None:
                     print(f"skip {model}/{mode}: missing {missing}")
                     continue
                 pair_result = retrieve_pair(pair, device, args.topk, args.batch_size)
-                rows, question_count, retrieval_seconds, topk, hit1, hitk = write_pair_rows(
+                rows, question_count, retrieval_seconds, topk = write_pair_rows(
                     writer, model, mode, pair_result, question_text, corpus_rows,
-                    manifest, manifest_path, device, input_name, gold_is_self)
+                    manifest, manifest_path, device, input_name, args.index, fact_text)
                 total_rows += rows
-                print(f"{model}/{mode}: {question_count} queries, top-{topk}, "
+                print(f"{model}/{mode}: {question_count} questions over "
+                      f"{len(pair[2])} {args.index} entries, top-{topk}, "
                       f"{retrieval_seconds:.3f}s on {device}")
-                if gold_is_self:
-                    summary.append((model, mode, question_count, hit1, hitk, topk))
     print(f"wrote {total_rows} rows to {args.output}")
-
-    if summary:
-        # For fact queries the answer is known, so report how often it was found.
-        k = summary[0][5]
-        print(f"\n{'model/mode':<28}{'n':>6}{'hit@1':>9}{f'hit@{k}':>9}")
-        for model, mode, n, hit1, hitk, _ in summary:
-            print(f"{model + '/' + mode:<28}{n:>6}{hit1 / n:>9.1%}{hitk / n:>9.1%}")
 
 
 if __name__ == "__main__":

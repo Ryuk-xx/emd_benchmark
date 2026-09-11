@@ -26,8 +26,8 @@ Inputs are discovered under data/, and anything absent is reported and skipped:
                                         similarity pairs, text_b       [query]
   coverage_top1_top4_top5.xlsx          Comparison sheet Question      [query]
                                         Comparison sheet Expected      [doc]
-  chunk_va_fact_500_bai.xlsx            facts per chunk, joined to the [query]
-                                        corpus by chunk id
+  chunk_va_fact_500_bai.xlsx            facts per chunk, an alternative [doc]
+                                        index keyed by chunk id
 """
 import argparse
 import csv
@@ -226,12 +226,14 @@ def discover_inputs(coverage_file=None, coverage_name="coverage"):
         got = load_fact_xlsx(fact_p, found.get("corpus", {}).get("ids"))
         if got:
             ids, texts = got
-            # A fact block is a probe against the corpus - "which chunk did these
-            # facts come from?" - so it is query-kind and takes the prefix in
-            # instruct mode, the way a retrieval query would. Fact blocks run to
-            # ~9k tokens, far past the 2048 default, so this input asks for a
-            # longer window; each model clamps it to its own cap.
-            found["fact"] = {"ids": ids, "texts": texts, "kind": "query",
+            # Fact blocks are an alternative INDEX: each one stands in for its
+            # chunk, and coverage questions are retrieved against them instead of
+            # the raw chunk text. That puts them on the document side, so like
+            # corpus they are encoded bare in both modes and only the query side
+            # changes with the instruction prefix. Fact blocks run to ~9k tokens,
+            # far past the 2048 default, so this input asks for a longer window;
+            # each model clamps it to its own cap.
+            found["fact"] = {"ids": ids, "texts": texts, "kind": "doc",
                              "max_seq_length": 8192}
 
     return found

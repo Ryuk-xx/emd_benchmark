@@ -137,7 +137,7 @@ plain dot product, and row *i* is the same item across every model and mode.
 | `calibration_b` | CSV, `text_b` column | 20 | **query** |
 | `coverage_questions` | xlsx `Comparison`, `Question` column | 60 | **query** |
 | `coverage_expected` | xlsx `Comparison`, `Expected` column | 60 | document |
-| `fact` | xlsx `Chunk và fact`, `CÁC FACT SINH RA TỪ CHUNK NÀY (f.text)` | 1,862 | **query** |
+| `fact` | xlsx `Chunk và fact`, `CÁC FACT SINH RA TỪ CHUNK NÀY (f.text)` | 1,862 | document |
 
 The coverage sheet is split in two on purpose. A question is a query and takes the
 instruction prefix; an expected answer is a statement and must not, or the two sides of
@@ -146,9 +146,11 @@ same case in each.
 
 `fact` is one row per chunk holding every fact extracted from it, keyed
 `<doc_id>::<chunk>` — the corpus's own chunk id — and written in `bench_ids` order, so
-`ids_fact.json` joins straight to `corpus.npy`. It is query-kind because a fact block is
-a probe against the corpus ("which chunk did these come from?"), so it takes the prefix
-in `instruct` mode the way a retrieval query would.
+`ids_fact.json` joins straight to `corpus.npy`. It is an **alternative index**: coverage
+questions are searched against the fact blocks instead of the raw chunk text
+(`retrieve_coverage_top5.py --index fact`), and a hit still reports the chunk the block
+stands for. That puts it on the document side, so like `corpus` it is encoded bare in
+both modes and only the question side changes with the prefix.
 
 Fact blocks are long: p50 ≈ 1k tokens, max ≈ 9k. They ask for an **8192-token window**
 rather than the 2048 default, and each model clamps that to its own cap — 32k for both
