@@ -80,10 +80,10 @@ def get_manifest(model_dir, mode):
     return {}, ""
 
 
-def embedding_timing(manifest, mode):
+def embedding_timing(manifest, mode, input_name):
     details = manifest.get("modes", {}).get(mode, {})
     corpus = details.get("corpus", {})
-    questions = details.get("coverage_questions", {})
+    questions = details.get(input_name, {})
     return {
         "embedding_corpus_seconds": corpus.get("encode_seconds", ""),
         "embedding_questions_seconds": questions.get("encode_seconds", ""),
@@ -123,13 +123,13 @@ def retrieve_gpu(questions, corpus, topk, batch_size):
     return np.concatenate(all_indices), np.concatenate(all_scores)
 
 
-def load_pair(model, mode):
+def load_pair(model, mode, input_name):
     directory = os.path.join(EMBEDDINGS, model, mode)
     paths = {
         "corpus": os.path.join(directory, "corpus.npy"),
-        "questions": os.path.join(directory, "coverage_questions.npy"),
+        "questions": os.path.join(directory, f"{input_name}.npy"),
         "corpus_ids": os.path.join(directory, "ids.json"),
-        "question_ids": os.path.join(directory, "ids_coverage_questions.json"),
+        "question_ids": os.path.join(directory, f"ids_{input_name}.json"),
     }
     missing = [name for name, path in paths.items() if not os.path.exists(path)]
     if missing:
@@ -175,9 +175,9 @@ def retrieve_pair(pair, device, topk, batch_size):
 
 
 def write_pair_rows(writer, model, mode, pair_result, question_text, corpus_rows,
-                    manifest, manifest_path, device):
+                    manifest, manifest_path, device, input_name):
     corpus_ids, question_ids, indices, scores, retrieval_seconds, topk = pair_result
-    timing = embedding_timing(manifest, mode)
+    timing = embedding_timing(manifest, mode, input_name)
     for question_row, question_id in enumerate(question_ids):
         for rank, (index, score) in enumerate(
                 zip(indices[question_row], scores[question_row]), 1):
@@ -213,14 +213,19 @@ def main():
     parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--device", choices=("auto", "cuda", "cpu"), default="auto")
     parser.add_argument("--output", default=DEFAULT_OUTPUT)
+    parser.add_argument("--coverage-file", default=os.path.join(
+                        DATA, "coverage_top1_top4_top5.xlsx"))
+    parser.add_argument("--coverage-name", default="coverage",
+                        help="use bo_sung for coverage_questions_bo_sung.npy")
     args = parser.parse_args()
     if args.topk < 1 or args.batch_size < 1:
         parser.error("--topk and --batch-size must be positive")
 
     device = resolve_device(args.device)
 
-    questions_path = os.path.join(DATA, "coverage_top1_top4_top5.xlsx")
-    question_text = load_questions(questions_path)
+    input_name = "coverage_questions" if args.coverage_name == "coverage" \
+        else f"coverage_questions_{args.coverage_name}"
+    question_text = load_questions(args.coverage_file)
     corpus_rows = {row["chunk_id"]: row for row in (
         json.loads(line) for line in open(os.path.join(DATA, "corpus.jsonl"), encoding="utf-8")
     )}
@@ -240,14 +245,14 @@ def main():
             model_dir = os.path.join(EMBEDDINGS, model)
             manifest, manifest_path = get_manifest(model_dir, args.modes[0])
             for mode in args.modes:
-                pair, missing = load_pair(model, mode)
+                pair, missing = load_pair(model, mode, input_name)
                 if pair is None:
                     print(f"skip {model}/{mode}: missing {missing}")
                     continue
                 pair_result = retrieve_pair(pair, device, args.topk, args.batch_size)
                 rows, question_count, retrieval_seconds, topk = write_pair_rows(
                     writer, model, mode, pair_result, question_text, corpus_rows,
-                    manifest, manifest_path, device)
+                    manifest, manifest_path, device, input_name)
                 total_rows += rows
                 print(f"{model}/{mode}: {question_count} questions, top-{topk}, "
                       f"{retrieval_seconds:.3f}s on {device}")
