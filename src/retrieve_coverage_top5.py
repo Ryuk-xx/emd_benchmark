@@ -206,7 +206,8 @@ def write_pair_rows(writer, model, mode, pair_result, question_text, corpus_rows
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--models", nargs="+", default=["qwen3_0.6b", "vn_embedding"])
+    parser.add_argument("--models", nargs="+",
+                        default=["qwen3_0.6b", "qwen3_vl_2b", "vn_embedding"])
     parser.add_argument("--modes", nargs="+", default=["no_instruct", "instruct"])
     parser.add_argument("--topk", type=int, default=5)
     parser.add_argument("--batch-size", type=int, default=256)
