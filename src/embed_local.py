@@ -26,8 +26,8 @@ Inputs are discovered under data/, and anything absent is reported and skipped:
                                         similarity pairs, text_b       [query]
   coverage_top1_top4_top5.xlsx          Comparison sheet Question      [query]
                                         Comparison sheet Expected      [doc]
-  chunk_va_fact_500_bai.xlsx            facts per chunk, an alternative [doc]
-                                        index keyed by chunk id
+  chunk_va_fact_500_bai.xlsx            one vector per fact, keyed     [doc]
+                                        <chunk_id>#<fact_id>
   bo_cau_hoi_681cbdeb_60.xlsx           sheet cau_hoi, column cau_hoi     [query]
 """
 import argparse
@@ -51,6 +51,8 @@ os.environ.setdefault("SENTENCE_TRANSFORMERS_HOME", MODEL_CACHE)
 
 import torch                                            # noqa: E402
 from sentence_transformers import SentenceTransformer   # noqa: E402
+
+from fact_xlsx import load_facts                         # noqa: E402
 
 MODES = ("no_instruct", "instruct")
 
@@ -224,18 +226,25 @@ def discover_inputs(coverage_file=None, coverage_name="coverage"):
 
     fact_p = os.path.join(d, "chunk_va_fact_500_bai.xlsx")
     if os.path.exists(fact_p):
-        got = load_fact_xlsx(fact_p, found.get("corpus", {}).get("ids"))
-        if got:
-            ids, texts = got
-            # Fact blocks are an alternative INDEX: each one stands in for its
-            # chunk, and coverage questions are retrieved against them instead of
-            # the raw chunk text. That puts them on the document side, so like
-            # corpus they are encoded bare in both modes and only the query side
-            # changes with the instruction prefix. Fact blocks run to ~9k tokens,
-            # far past the 2048 default, so this input asks for a longer window;
-            # each model clamps it to its own cap.
-            found["fact"] = {"ids": ids, "texts": texts, "kind": "doc",
-                             "max_seq_length": 8192}
+        facts = load_facts(fact_p)
+        if facts:
+            # One vector per FACT, not per chunk. Each key is <chunk_id>#<fact_id>,
+            # so a hit resolves to its chunk by splitting on "#" (see fact_xlsx.py).
+            # Facts are an alternative INDEX - questions are retrieved against them
+            # instead of the raw chunk text - which puts them on the document side:
+            # encoded bare in both modes, only the query side takes the prefix.
+            # Kept in bench_ids order of their chunk so rows group by chunk.
+            corpus_ids = found.get("corpus", {}).get("ids")
+            if corpus_ids:
+                pos = {c: i for i, c in enumerate(corpus_ids)}
+                unknown = sorted({f["chunk_id"] for f in facts if f["chunk_id"] not in pos})
+                if unknown:
+                    print(f"  fact: {len(unknown)} chunks in the workbook are not in "
+                          f"the corpus (e.g. {unknown[:3]}) - their facts dropped")
+                facts = sorted((f for f in facts if f["chunk_id"] in pos),
+                               key=lambda f: (pos[f["chunk_id"]], f["k"]))
+            found["fact"] = {"ids": [f["id"] for f in facts],
+                             "texts": [f["text"] for f in facts], "kind": "doc"}
 
     bch_p = os.path.join(d, "bo_cau_hoi_681cbdeb_60.xlsx")
     if os.path.exists(bch_p):
@@ -275,56 +284,6 @@ def load_bo_cau_hoi_xlsx(path):
     if len(set(ids)) != len(ids):
         raise SystemExit(f"{os.path.basename(path)}: duplicate stt values")
     return ids, texts
-
-
-def load_fact_xlsx(path, corpus_order=None):
-    """Read the 'Chunk và fact' sheet: one row per chunk, its facts concatenated.
-
-    Returns (chunk_ids, fact_texts) with chunk_id = "<doc_id>::<chunk>", the same key
-    the corpus uses, so a fact row joins to its source chunk by id. Rows are put in
-    bench_ids order when the corpus is present, so corpus[idx] lines up directly.
-    """
-    try:
-        import openpyxl
-    except ImportError:
-        print("  fact xlsx found but openpyxl is not installed - skipping")
-        return None
-    wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
-    sheet = "Chunk và fact" if "Chunk và fact" in wb.sheetnames else wb.sheetnames[0]
-    rows = list(wb[sheet].iter_rows(values_only=True))
-    wb.close()
-    if not rows:
-        return None
-
-    header = [str(c).strip().lower() if c is not None else "" for c in rows[0]]
-    i_doc = next((i for i, h in enumerate(header) if h == "doc_id"), None)
-    i_chunk = next((i for i, h in enumerate(header) if h == "chunk"), None)
-    i_fact = next((i for i, h in enumerate(header) if "f.text" in h), None)
-    if None in (i_doc, i_chunk, i_fact):
-        print(f"  {os.path.basename(path)}: sheet '{sheet}' lacks "
-              f"doc_id / chunk / (f.text) columns - skipping")
-        return None
-
-    recs = {}
-    for r in rows[1:]:
-        if not any(r) or r[i_doc] is None or not r[i_fact]:
-            continue
-        chunk = 0 if r[i_chunk] in (None, "") else int(r[i_chunk])
-        cid = f"{int(r[i_doc])}::{chunk}"
-        if cid in recs:
-            raise SystemExit(f"{os.path.basename(path)}: duplicate chunk id {cid}")
-        recs[cid] = nfc(r[i_fact])
-
-    if corpus_order:
-        pos = {c: i for i, c in enumerate(corpus_order)}
-        unknown = [c for c in recs if c not in pos]
-        if unknown:
-            print(f"  fact: {len(unknown)} rows have no matching corpus chunk "
-                  f"(e.g. {unknown[:3]}) - dropped")
-        ids = sorted((c for c in recs if c in pos), key=pos.__getitem__)
-    else:
-        ids = list(recs)
-    return ids, [recs[c] for c in ids]
 
 
 def encode_timed(model, texts, prompt, batch_size, device):

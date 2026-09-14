@@ -7,12 +7,15 @@ mode, and rank, including chunk metadata and embedding/retrieval timings.
 Two indexes to search, chosen with ``--index``:
 
   corpus   the raw chunk text, ``corpus.npy`` (default)
-  fact     each chunk represented by the facts extracted from it, ``fact.npy``
+  fact     one vector per extracted fact, ``fact.npy``, keyed <chunk_id>#<fact_id>
 
-Both are keyed by chunk id, so a hit in the fact index still reports the chunk it
-stands for, plus the fact text that matched in ``fact_text``.  Comparing the two
-runs on the same questions shows whether searching over extracted facts finds the
-right chunk more often than searching over the chunk itself.
+With the fact index a question is scored against every individual fact, and the
+hits are then folded back to chunks: a chunk's score is the best score among its
+facts (its peak), chunks are ranked by peak, and each row reports the peak fact in
+``fact_id`` / ``fact_text`` plus ``n_facts_top50``, how many of that chunk's facts
+sit in the question's 50 best facts.  Comparing the two runs on the same questions
+shows whether searching over extracted facts finds the right chunk more often
+than searching over the chunk itself.
 
 Examples::
 
@@ -30,6 +33,8 @@ import os
 import time
 
 import numpy as np
+
+from fact_xlsx import chunk_of, load_facts
 
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -77,38 +82,13 @@ def load_questions(path):
     return questions
 
 
-def load_fact_text(path):
-    """Return fact-block text keyed by chunk id, matching ids_fact.json."""
-    try:
-        import openpyxl
-    except ImportError:
-        print("warning: openpyxl is not installed; fact text will use chunk IDs")
+def load_fact_lookup(path):
+    """fact key -> (fact_id, sentence), matching ids_fact.json."""
+    facts = load_facts(path)
+    if not facts:
+        print(f"warning: no facts read from {path}; fact_text will be blank")
         return {}
-    if not os.path.exists(path):
-        print(f"warning: {path} not found; fact text will use chunk IDs")
-        return {}
-
-    workbook = openpyxl.load_workbook(path, read_only=True, data_only=True)
-    sheet_name = "Chunk và fact" if "Chunk và fact" in workbook.sheetnames \
-        else workbook.sheetnames[0]
-    rows = list(workbook[sheet_name].iter_rows(values_only=True))
-    workbook.close()
-    if not rows:
-        return {}
-    header = [str(v).strip().lower() if v is not None else "" for v in rows[0]]
-    doc_col = next((i for i, h in enumerate(header) if h == "doc_id"), None)
-    chunk_col = next((i for i, h in enumerate(header) if h == "chunk"), None)
-    fact_col = next((i for i, h in enumerate(header) if "f.text" in h), None)
-    if None in (doc_col, chunk_col, fact_col):
-        return {}
-
-    texts = {}
-    for row in rows[1:]:
-        if not any(row) or row[doc_col] is None or not row[fact_col]:
-            continue
-        chunk = 0 if row[chunk_col] in (None, "") else int(row[chunk_col])
-        texts[f"{int(row[doc_col])}::{chunk}"] = str(row[fact_col]).strip()
-    return texts
+    return {f["id"]: (f["fact_id"] or "", f["text"]) for f in facts}
 
 
 def normalize(vectors):
@@ -215,29 +195,60 @@ def resolve_device(requested):
     return "cuda"
 
 
-def retrieve_pair(pair, device, topk, batch_size):
+FACT_POOL = 50      # facts considered per question before folding to chunks
+
+
+def retrieve_pair(pair, device, topk, batch_size, index="corpus"):
+    """Top-k index entries per question.
+
+    For the corpus index that is simply the k best chunks. For the fact index the
+    k best *chunks* are found by taking the FACT_POOL best facts, grouping them by
+    the chunk each fact came from, scoring a chunk by its best fact (peak), and
+    ranking chunks by peak. Each hit then carries the peak fact and how many of
+    the chunk's facts were in the pool.
+    """
     corpus, questions, corpus_ids, question_ids = pair
-    actual_topk = min(topk, len(corpus_ids))
     started = time.perf_counter()
+    if index != "fact":
+        actual_topk = min(topk, len(corpus_ids))
+        if device == "cuda":
+            indices, scores = retrieve_gpu(questions, corpus, actual_topk, batch_size)
+        else:
+            indices, scores = retrieve_cpu(questions, corpus, actual_topk)
+        hits = [[(corpus_ids[int(i)], float(sc), None, 0)
+                 for i, sc in zip(indices[q], scores[q])]
+                for q in range(len(question_ids))]
+        return hits, question_ids, time.perf_counter() - started, actual_topk
+
+    pool = min(max(FACT_POOL, topk), len(corpus_ids))
     if device == "cuda":
-        indices, scores = retrieve_gpu(questions, corpus, actual_topk, batch_size)
+        indices, scores = retrieve_gpu(questions, corpus, pool, batch_size)
     else:
-        indices, scores = retrieve_cpu(questions, corpus, actual_topk)
-    return (corpus_ids, question_ids, indices, scores,
-            time.perf_counter() - started, actual_topk)
+        indices, scores = retrieve_cpu(questions, corpus, pool)
+    hits = []
+    for q in range(len(question_ids)):
+        best, count = {}, {}
+        for i, sc in zip(indices[q], scores[q]):          # already best-first
+            key = corpus_ids[int(i)]
+            chunk = chunk_of(key)
+            count[chunk] = count.get(chunk, 0) + 1
+            if chunk not in best:
+                best[chunk] = (float(sc), key)             # first seen = peak
+        ranked = sorted(best.items(), key=lambda kv: -kv[1][0])[:topk]
+        hits.append([(chunk, sc, key, count[chunk]) for chunk, (sc, key) in ranked])
+    return hits, question_ids, time.perf_counter() - started, topk
 
 
 def write_pair_rows(writer, model, mode, pair_result, question_text, corpus_rows,
                     manifest, manifest_path, device, input_name, index="corpus",
-                    fact_text=None):
-    corpus_ids, question_ids, indices, scores, retrieval_seconds, topk = pair_result
+                    fact_lookup=None):
+    hits, question_ids, retrieval_seconds, topk = pair_result
     timing = embedding_timing(manifest, mode, input_name)
-    fact_text = fact_text or {}
+    fact_lookup = fact_lookup or {}
     for question_row, question_id in enumerate(question_ids):
-        for rank, (index_pos, score) in enumerate(
-                zip(indices[question_row], scores[question_row]), 1):
-            chunk_id = corpus_ids[int(index_pos)]
+        for rank, (chunk_id, score, fact_key, n_facts) in enumerate(hits[question_row], 1):
             chunk = corpus_rows.get(chunk_id, {})
+            fact_id, fact_text = fact_lookup.get(fact_key, ("", "")) if fact_key else ("", "")
             writer.writerow({
                 "model": model,
                 "mode": mode,
@@ -247,7 +258,9 @@ def write_pair_rows(writer, model, mode, pair_result, question_text, corpus_rows
                 "index": index,
                 "chunk_id": chunk_id,
                 "score": f"{float(score):.8f}",
-                "fact_text": fact_text.get(chunk_id, "") if index == "fact" else "",
+                "fact_id": fact_id,
+                "fact_text": fact_text,
+                "n_facts_top50": n_facts if index == "fact" else "",
                 "title": chunk.get("title", ""),
                 "text": chunk.get("text", ""),
                 "doc_id": chunk.get("doc_id", ""),
@@ -258,7 +271,7 @@ def write_pair_rows(writer, model, mode, pair_result, question_text, corpus_rows
                 "retrieval_device": device,
                 "retrieval_seconds": f"{retrieval_seconds:.6f}",
             })
-    return len(question_ids) * topk, len(question_ids), retrieval_seconds, topk
+    return sum(len(h) for h in hits), len(question_ids), retrieval_seconds, topk
 
 
 def main():
@@ -288,7 +301,7 @@ def main():
     input_name = "coverage_questions" if args.coverage_name == "coverage" \
         else f"coverage_questions_{args.coverage_name}"
     question_text = load_questions(args.coverage_file)
-    fact_text = load_fact_text(args.fact_file) if args.index == "fact" else {}
+    fact_lookup = load_fact_lookup(args.fact_file) if args.index == "fact" else {}
 
     # Derive the output name from what was searched, so a bo_sung run or a fact-
     # index run cannot silently overwrite the default corpus run.
@@ -305,7 +318,7 @@ def main():
     os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
     fieldnames = [
         "model", "mode", "question_id", "question", "rank", "index", "chunk_id",
-        "score", "fact_text",
+        "score", "fact_id", "fact_text", "n_facts_top50",
         "title", "text", "doc_id", "chunk_index", "businesses", "embedding_manifest",
         "embedding_corpus_seconds", "embedding_questions_seconds",
         "embedding_corpus_items_per_second", "embedding_questions_items_per_second",
@@ -323,13 +336,15 @@ def main():
                 if pair is None:
                     print(f"skip {model}/{mode}: missing {missing}")
                     continue
-                pair_result = retrieve_pair(pair, device, args.topk, args.batch_size)
+                pair_result = retrieve_pair(pair, device, args.topk, args.batch_size,
+                                            args.index)
                 rows, question_count, retrieval_seconds, topk = write_pair_rows(
                     writer, model, mode, pair_result, question_text, corpus_rows,
-                    manifest, manifest_path, device, input_name, args.index, fact_text)
+                    manifest, manifest_path, device, input_name, args.index, fact_lookup)
                 total_rows += rows
+                unit = "facts, folded to chunks" if args.index == "fact" else "chunks"
                 print(f"{model}/{mode}: {question_count} questions over "
-                      f"{len(pair[2])} {args.index} entries, top-{topk}, "
+                      f"{len(pair[2])} {unit}, top-{topk}, "
                       f"{retrieval_seconds:.3f}s on {device}")
     print(f"wrote {total_rows} rows to {args.output}")
 

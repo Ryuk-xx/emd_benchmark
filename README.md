@@ -138,7 +138,7 @@ plain dot product, and row *i* is the same item across every model and mode.
 | `calibration_b` | CSV, `text_b` column | 20 | **query** |
 | `coverage_questions` | xlsx `Comparison`, `Question` column | 60 | **query** |
 | `coverage_expected` | xlsx `Comparison`, `Expected` column | 60 | document |
-| `fact` | xlsx `Chunk và fact`, `CÁC FACT SINH RA TỪ CHUNK NÀY (f.text)` | 1,862 | document |
+| `fact` | xlsx `Chunk và fact`, one vector **per fact** in the `(f.text)` column | 19,529 | document |
 | `bo_cau_hoi` | xlsx `cau_hoi`, `cau_hoi` column, keyed by `stt` | 60 | **query** |
 
 The coverage sheet is split in two on purpose. A question is a query and takes the
@@ -146,21 +146,20 @@ instruction prefix; an expected answer is a statement and must not, or the two s
 the same case are not comparable. Both files keep the `Case` order, so row *i* is the
 same case in each.
 
-`fact` is one row per chunk holding every fact extracted from it, keyed
-`<doc_id>::<chunk>` — the corpus's own chunk id — and written in `bench_ids` order, so
-`ids_fact.json` joins straight to `corpus.npy`. It is an **alternative index**: coverage
-questions are searched against the fact blocks instead of the raw chunk text
-(`retrieve_coverage_top5.py --index fact`), and a hit still reports the chunk the block
-stands for. That puts it on the document side, so like `corpus` it is encoded bare in
-both modes and only the question side changes with the prefix.
+`fact` is one vector **per extracted fact**. The `(f.text)` column holds a formatted
+block per chunk — numbered sentences each followed by a `[type · polarity · certainty]`
+line and a `chủ thể: … · object: …` line — and only the numbered sentence is embedded;
+the number and both metadata lines are dropped (`src/fact_xlsx.py`). Each fact is keyed
+`<doc_id>::<chunk>#<fact_id>`: the chunk part is the corpus's own id, so a hit resolves
+to its chunk by splitting on `#`, and the fact_id comes from sheet `Fact (từng dòng)`,
+whose rows line up one-to-one with the numbered sentences (19,529 of 19,529 verified on
+both text and position). A fact_id alone is not unique — 233 facts are asserted by more
+than one chunk — hence the composite key. Facts are an **alternative index**
+(`retrieve_coverage_top5.py --index fact`): a question is scored against every fact,
+hits are folded to chunks by their best fact (peak), and each row reports that peak
+fact plus how many of the chunk's facts sat in the question's 50 best. Being index
+entries, facts are encoded bare in both modes like `corpus`.
 
-Fact blocks are long: p50 ≈ 1k tokens, max ≈ 9k. They ask for an **8192-token window**
-rather than the default (4096 for the Qwen models, 2048 for `vn_embedding`), and each
-model clamps that to its own cap — 32k for both
-Qwen models, so nothing is cut; 2048 for `vn_embedding`, whose model card stops there,
-so roughly a fifth of its fact rows are truncated. The manifest records the window and
-the truncated count per input; read them before comparing `vn_embedding` on this input.
-Long windows also shrink the batch to a quarter of `--batch-size` to stay inside VRAM.
 
 Copy `embeddings/vn_embedding/`, `embeddings/qwen3_0.6b/` and `embeddings/qwen3_vl_2b/`
 back here to score.
