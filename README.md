@@ -69,6 +69,7 @@ data/queries.jsonl                         once the golden set exists
 data/embedding_calibration_testcases.csv   optional, similarity-calibration pairs
 data/coverage_top1_top4_top5.xlsx          optional, 60 Question/Expected cases
 data/chunk_va_fact_500_bai.xlsx            optional, facts per chunk (1,862 rows)
+data/bo_cau_hoi_681cbdeb_60.xlsx           optional, 60 questions with gold chunks
 ```
 
 Everything under `data/` is picked up automatically; anything absent is reported and
@@ -138,6 +139,7 @@ plain dot product, and row *i* is the same item across every model and mode.
 | `coverage_questions` | xlsx `Comparison`, `Question` column | 60 | **query** |
 | `coverage_expected` | xlsx `Comparison`, `Expected` column | 60 | document |
 | `fact` | xlsx `Chunk và fact`, `CÁC FACT SINH RA TỪ CHUNK NÀY (f.text)` | 1,862 | document |
+| `bo_cau_hoi` | xlsx `cau_hoi`, `cau_hoi` column, keyed by `stt` | 60 | **query** |
 
 The coverage sheet is split in two on purpose. A question is a query and takes the
 instruction prefix; an expected answer is a statement and must not, or the two sides of
@@ -173,6 +175,19 @@ two rows in the same table.
 python src/evaluate.py
 python src/evaluate.py --models ada002 qwen3_0.6b/instruct qwen3_0.6b/no_instruct
 ```
+
+**5b. Fill the question workbook**
+
+```bash
+python src/fill_bo_cau_hoi.py            # in place; keeps data/bo_cau_hoi_681cbdeb_60.bak.xlsx
+python src/fill_bo_cau_hoi.py --dry-run  # report only
+```
+
+Writes the local models' vectors into sheet `embedding` (one row per question and
+config, vectors split into 512-float JSON parts across `phan_1..phan_N`) and their
+top-5 against the corpus into sheet `top5`, following the format the ada / 3-large rows
+already use. `chunk_id` there is the Neo4j element id, as the workbook expects. Rows for
+our configs are replaced on each run; ada, 3large and fact10 rows are never touched.
 
 **5. Score the calibration pairs**
 

@@ -28,6 +28,7 @@ Inputs are discovered under data/, and anything absent is reported and skipped:
                                         Comparison sheet Expected      [doc]
   chunk_va_fact_500_bai.xlsx            facts per chunk, an alternative [doc]
                                         index keyed by chunk id
+  bo_cau_hoi_681cbdeb_60.xlsx           sheet cau_hoi, column cau_hoi     [query]
 """
 import argparse
 import csv
@@ -236,7 +237,44 @@ def discover_inputs(coverage_file=None, coverage_name="coverage"):
             found["fact"] = {"ids": ids, "texts": texts, "kind": "doc",
                              "max_seq_length": 8192}
 
+    bch_p = os.path.join(d, "bo_cau_hoi_681cbdeb_60.xlsx")
+    if os.path.exists(bch_p):
+        got = load_bo_cau_hoi_xlsx(bch_p)
+        if got:
+            ids, texts = got
+            found["bo_cau_hoi"] = {"ids": ids, "texts": texts, "kind": "query"}
+
     return found
+
+
+def load_bo_cau_hoi_xlsx(path):
+    """Read sheet 'cau_hoi': (stt as str, question) per row, in sheet order."""
+    try:
+        import openpyxl
+    except ImportError:
+        print("  bo_cau_hoi xlsx found but openpyxl is not installed - skipping")
+        return None
+    wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+    sheet = "cau_hoi" if "cau_hoi" in wb.sheetnames else wb.sheetnames[0]
+    rows = list(wb[sheet].iter_rows(values_only=True))
+    wb.close()
+    if not rows:
+        return None
+    header = [str(c).strip().lower() if c is not None else "" for c in rows[0]]
+    i_stt = next((i for i, h in enumerate(header) if h == "stt"), None)
+    i_q = next((i for i, h in enumerate(header) if h == "cau_hoi"), None)
+    if None in (i_stt, i_q):
+        print(f"  {os.path.basename(path)}: sheet '{sheet}' lacks stt / cau_hoi - skipping")
+        return None
+    ids, texts = [], []
+    for r in rows[1:]:
+        if not any(r) or r[i_stt] is None or not r[i_q]:
+            continue
+        ids.append(str(r[i_stt]).strip())
+        texts.append(nfc(r[i_q]))
+    if len(set(ids)) != len(ids):
+        raise SystemExit(f"{os.path.basename(path)}: duplicate stt values")
+    return ids, texts
 
 
 def load_fact_xlsx(path, corpus_order=None):
@@ -470,7 +508,7 @@ def main():
                     choices=["all", "corpus", "queries",
                              "calibration_a", "calibration_b", "calibration",
                              "coverage_questions", "coverage_expected", "coverage",
-                             "fact"],
+                             "fact", "bo_cau_hoi"],
                     help="'calibration' and 'coverage' each mean both of their halves")
     ap.add_argument("--coverage-file", default=None,
                     help="coverage workbook path; defaults to data/coverage_top1_top4_top5.xlsx")
@@ -502,7 +540,7 @@ def main():
                          f"(found: {', '.join(available) or 'none'})")
 
     all_names = ("corpus", "queries", "calibration_a", "calibration_b",
-                 "coverage_questions", "coverage_expected", "fact")
+                 "coverage_questions", "coverage_expected", "fact", "bo_cau_hoi")
     print("\ninputs found:")
     for name, d in inputs.items():
         chars = sum(len(t) for t in d["texts"])
