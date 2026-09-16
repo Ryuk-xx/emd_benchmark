@@ -215,6 +215,39 @@ documents. Texts are NFC-normalised and de-duplicated, then sampled evenly acros
 length sub-bins and sources so a band is not all one length or one kind of text. A band
 that cannot be filled is emitted short with a warning rather than padded.
 
+**5d. Performance benchmark**
+
+```bash
+pip install psutil nvidia-ml-py            # RAM and GPU-utilisation sampling
+python src/benchmark_embedding.py --dry-run
+python src/benchmark_embedding.py          # -> results/benchmark_results.csv
+```
+
+Speed and resource use only, `no_instruct` for every model. One CSV row per
+(model, dataset, max_length, batch_size) with status `ok`, `unsupported`, `OOM` or
+`error`, carrying latency mean/p50/p95/p99, samples/s, tokens/s, GPU utilisation, VRAM
+allocated and peak, and CPU RAM current and peak.
+
+The grid is 3 models x 4 dataset/window pairs x 5 batch sizes = 60 configurations:
+
+| dataset | max_length | note |
+|---|---|---|
+| `short` | 128 | a window that fits the data |
+| `short` | 2048 | same data, oversized window — isolates its cost |
+| `medium` | 2048 | |
+| `long` | 8192 | `vn_embedding` caps at 2048, so these 5 rows are `unsupported` |
+
+Warm-up runs are excluded from every measurement and from the VRAM peak
+(`reset_peak_memory_stats` runs again after warm-up). `torch.cuda.synchronize()` brackets
+each timed encode. A batch size that OOMs marks the larger ones OOM too rather than
+retrying them, and CUDA is emptied between configurations and models so they cannot skew
+each other.
+
+Two token columns, deliberately: `actual_token_count` is the real tokens in the batch
+after truncation and drives `tokens_per_sec`; `padded_token_count` is batch_size x the
+longest sequence, which is what the GPU actually computes. A large gap between them
+means the batch is mostly padding.
+
 **5. Score the calibration pairs**
 
 ```bash

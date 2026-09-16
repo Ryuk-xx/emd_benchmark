@@ -5,3 +5,5 @@ sentence-transformers>=3.0.0
 transformers>=4.57.0    # Qwen3-VL-Embedding-2B needs this
 numpy>=1.24
 openpyxl>=3.1          # reads data/coverage_top1_top4_top5.xlsx
+psutil>=5.9            # CPU RAM sampling in src/benchmark_embedding.py
+nvidia-ml-py>=12.0     # GPU utilisation; optional, column stays empty without it
