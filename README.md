@@ -188,6 +188,33 @@ top-5 against the corpus into sheet `top5`, following the format the ada / 3-lar
 already use. `chunk_id` there is the Neo4j element id, as the workbook expects. Rows for
 our configs are replaced on each run; ada, 3large and fact10 rows are never touched.
 
+**5c. Throughput dataset**
+
+```bash
+python src/build_perf_dataset.py --dry-run     # availability only
+python src/build_perf_dataset.py               # -> results/perf_dataset/*.csv
+```
+
+Length-stratified samples for timing runs — speed only, no labels. 200 per band by
+default, bucketed with the Qwen tokenizer because it spends the most tokens on
+Vietnamese of the models under test, so every other model stays at or below the stated
+band. Columns: `id, text, token_count, length_group` plus `source, char_count, doc_id,
+n_chunks, sha256`. One combined CSV and one per band.
+
+| band | tokens | source |
+|---|---|---|
+| `short` | [1, 40) | questions, answers, single extracted facts, short chunks |
+| `medium` | [500, 2000) | one chunk, or one chunk's facts joined |
+| `long` | [7000, 8000) | consecutive chunks of **one** document, in order |
+
+No single chunk reaches 7000 tokens and only 84 documents reach it in total, so a long
+sample is a real document prefix: whole chunks of one document concatenated in order
+until the total lands in the band. 353 documents qualify, one sample each, so the 200
+picked are 200 distinct documents — nothing invented, nothing stitched across
+documents. Texts are NFC-normalised and de-duplicated, then sampled evenly across
+length sub-bins and sources so a band is not all one length or one kind of text. A band
+that cannot be filled is emitted short with a warning rather than padded.
+
 **5. Score the calibration pairs**
 
 ```bash
