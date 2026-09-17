@@ -228,14 +228,30 @@ Speed and resource use only, `no_instruct` for every model. One CSV row per
 `error`, carrying latency mean/p50/p95/p99, samples/s, tokens/s, GPU utilisation, VRAM
 allocated and peak, and CPU RAM current and peak.
 
-The grid is 3 models x 4 dataset/window pairs x 5 batch sizes = 60 configurations:
+Two modes share one timing loop:
+
+| mode | `batch_size` | what is timed |
+|---|---|---|
+| single | `single` | one request per sample, sequentially, over every sample in the dataset (200) |
+| batch | 1, 4, 16, 32, 64 | 40 runs per batch size over a rotating window of samples |
+
+They answer different questions. Single is what an online service sees, and its
+percentiles span the dataset's whole length distribution. `batch_size=1` is repeated
+runs over a window, so it is not the same measurement. `--no-single` skips single mode;
+`--single-samples N` times N requests instead of the whole dataset.
+
+The dataset CSVs are sorted by token count, so each is shuffled once with a fixed seed
+before sampling. Without it, small batches only ever see the shortest samples and look
+faster than they are. `--no-shuffle` keeps the sorted order.
+
+The grid is 3 models x 4 dataset/window pairs x 6 modes = 72 configurations:
 
 | dataset | max_length | note |
 |---|---|---|
 | `short` | 128 | a window that fits the data |
 | `short` | 2048 | same data, oversized window — isolates its cost |
 | `medium` | 2048 | |
-| `long` | 8192 | `vn_embedding` caps at 2048, so these 5 rows are `unsupported` |
+| `long` | 8192 | `vn_embedding` caps at 2048, so these 6 rows are `unsupported` |
 
 Warm-up runs are excluded from every measurement and from the VRAM peak
 (`reset_peak_memory_stats` runs again after warm-up). `torch.cuda.synchronize()` brackets

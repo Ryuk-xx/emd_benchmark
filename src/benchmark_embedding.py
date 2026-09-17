@@ -6,13 +6,23 @@ timed is the raw encode path.
 
     python src/benchmark_embedding.py
     python src/benchmark_embedding.py --models qwen_0.6 --batch-sizes 1 8
+    python src/benchmark_embedding.py --no-single   # batch mode only
     python src/benchmark_embedding.py --dry-run     # print the grid, load nothing
 
 Everything worth changing sits in the CONFIG block below.
 
 Each row of benchmark_results.csv is one (model, dataset, max_length, batch_size)
 configuration with status `ok`, `unsupported` (the model cannot take that
-max_length), `OOM`, or `error`.
+max_length), `OOM`, or `error`. batch_size is `single` for the single-request mode.
+
+Two modes, sharing one timing loop:
+
+  single  one request per sample, sent one after another over SINGLE_SAMPLES distinct
+          samples - what an online service sees. Its percentiles describe the latency
+          across the dataset's length distribution.
+  batch   BENCH_RUNS timed runs at each batch size. batch_size=1 here is repeated
+          runs over a rotating window of samples, not a pass over the dataset, so it
+          is not the same measurement as single.
 
 Two numbers describe the batch, and they are not the same thing:
 
@@ -28,6 +38,7 @@ import csv
 import gc
 import json
 import os
+import random
 import statistics
 import threading
 import time
@@ -68,6 +79,17 @@ CONFIGURATIONS = [
 BATCH_SIZES = [1, 4, 16, 32, 64]
 WARMUP_RUNS = 10                       # not timed
 BENCH_RUNS = 40                        # timed
+
+# Single mode: one request per sample, sequentially, over distinct samples.
+SINGLE_MODE = True
+SINGLE_WARMUP = 10                     # not timed
+SINGLE_SAMPLES = None                  # None = every sample in the dataset
+
+# The dataset CSVs are sorted by token count. Without shuffling, batch_size=1 only
+# ever touches the shortest samples near the top of the file, which flatters it.
+# Shuffled once per dataset with a fixed seed, so runs stay reproducible.
+SHUFFLE_SAMPLES = True
+SEED = 20260917
 FP16 = True
 NORMALIZE = True                       # as production does
 CONVERT_TO_NUMPY = True                # includes the GPU->CPU copy in the latency
@@ -224,7 +246,7 @@ ADAPTERS = defaultdict(lambda: SentenceTransformerAdapter)
 
 # ------------------------------------------------------------------ bench
 
-def load_datasets():
+def load_datasets(shuffle=SHUFFLE_SAMPLES):
     out = {}
     for name, fn in DATASET_FILES.items():
         path = abspath(os.path.join(DATASET_DIR, fn))
@@ -233,8 +255,12 @@ def load_datasets():
             continue
         with open(path, encoding="utf-8-sig") as f:
             rows = [r for r in csv.DictReader(f) if r.get("text")]
-        out[name] = [r["text"] for r in rows]
-        print(f"  {name:<8} {len(out[name]):>4} samples  ({fn})")
+        texts = [r["text"] for r in rows]
+        if shuffle:
+            random.Random(f"{SEED}:{name}").shuffle(texts)
+        out[name] = texts
+        print(f"  {name:<8} {len(texts):>4} samples  ({fn})"
+              + ("  shuffled" if shuffle else ""))
     return out
 
 
@@ -260,34 +286,27 @@ def is_oom(exc):
     return "out of memory" in str(exc).lower()
 
 
-def run_configuration(adapter, texts, dataset, max_length, batch_size, monitor,
-                      device, warmup=WARMUP_RUNS, runs=BENCH_RUNS):
+def measure(adapter, warmup_batches, timed_batches, max_length, monitor, device):
+    """The timing loop both modes share. Returns metric fields, or raises on OOM.
+
+    Warm-up is excluded from latency and from the VRAM peak; each timed encode is
+    bracketed by torch.cuda.synchronize so the GPU work is inside the measurement.
+    """
     import torch
 
-    row = {"model": adapter.name, "dataset": dataset, "max_length": max_length,
-           "batch_size": batch_size, "status": "ok", "runs": 0, "error": ""}
-
-    if not adapter.supports(max_length):
-        row["status"] = "unsupported"
-        row["error"] = f"max_length {max_length} > model cap {adapter.cfg['cap']}"
-        return row
-
-    adapter.set_max_length(max_length)
     if device == "cuda":
         torch.cuda.empty_cache()
         torch.cuda.reset_peak_memory_stats()
+    for batch in warmup_batches:                    # not timed
+        adapter.encode(batch)
+    if device == "cuda":
+        torch.cuda.synchronize()
+        torch.cuda.reset_peak_memory_stats()        # exclude warm-up from the peak
 
+    latencies, real_tokens, padded_tokens, n_samples = [], [], [], 0
+    monitor.start()
     try:
-        for i in range(warmup):                     # not timed
-            adapter.encode(make_batch(texts, batch_size, i))
-        if device == "cuda":
-            torch.cuda.synchronize()
-            torch.cuda.reset_peak_memory_stats()    # exclude warm-up from the peak
-
-        latencies, real_tokens, padded_tokens = [], [], []
-        monitor.start()
-        for i in range(runs):
-            batch = make_batch(texts, batch_size, warmup + i)
+        for batch in timed_batches:
             real, padded = adapter.count_tokens(batch, max_length)
             if device == "cuda":
                 torch.cuda.synchronize()
@@ -298,48 +317,82 @@ def run_configuration(adapter, texts, dataset, max_length, batch_size, monitor,
             latencies.append((time.perf_counter() - t0) * 1000.0)
             real_tokens.append(real)
             padded_tokens.append(padded)
+            n_samples += len(batch)
+    finally:
         res = monitor.stop()
-    except Exception as exc:                        # noqa: BLE001 - reported per row
-        monitor.stop()
-        if device == "cuda":
-            torch.cuda.empty_cache()
-        row["status"] = "OOM" if is_oom(exc) else "error"
-        row["error"] = f"{type(exc).__name__}: {exc}"[:300]
-        return row
 
-    mean_ms = statistics.mean(latencies)
-    mean_real = statistics.mean(real_tokens)
-    row.update({
-        "actual_token_count": round(mean_real, 1),
+    total_s = sum(latencies) / 1000.0
+    out = {
+        "actual_token_count": round(statistics.mean(real_tokens), 1),
         "padded_token_count": round(statistics.mean(padded_tokens), 1),
-        "latency_mean_ms": round(mean_ms, 3),
+        "latency_mean_ms": round(statistics.mean(latencies), 3),
         "latency_p50_ms": round(pct(latencies, 50), 3),
         "latency_p95_ms": round(pct(latencies, 95), 3),
         "latency_p99_ms": round(pct(latencies, 99), 3),
-        "samples_per_sec": round(batch_size / (mean_ms / 1000.0), 2),
-        "tokens_per_sec": round(mean_real / (mean_ms / 1000.0), 1),
+        # Totals over the timed encodes: for a fixed batch size this equals
+        # batch_size / mean latency, and it stays correct for single mode.
+        "samples_per_sec": round(n_samples / total_s, 2),
+        "tokens_per_sec": round(sum(real_tokens) / total_s, 1),
         "runs": len(latencies),
         **res,
-    })
+    }
     if device == "cuda":
-        row["vram_mb"] = round(torch.cuda.memory_allocated() / 1e6, 1)
-        row["peak_vram_mb"] = round(torch.cuda.max_memory_allocated() / 1e6, 1)
-        row["peak_vram_reserved_mb"] = round(torch.cuda.max_memory_reserved() / 1e6, 1)
+        out["vram_mb"] = round(torch.cuda.memory_allocated() / 1e6, 1)
+        out["peak_vram_mb"] = round(torch.cuda.max_memory_allocated() / 1e6, 1)
+        out["peak_vram_reserved_mb"] = round(torch.cuda.max_memory_reserved() / 1e6, 1)
+    return out
+
+
+def _run(adapter, dataset, max_length, batch_size, monitor, device,
+         warmup_batches, timed_batches):
+    row = {"model": adapter.name, "dataset": dataset, "max_length": max_length,
+           "batch_size": batch_size, "status": "ok", "runs": 0, "error": ""}
+    if not adapter.supports(max_length):
+        row["status"] = "unsupported"
+        row["error"] = f"max_length {max_length} > model cap {adapter.cfg['cap']}"
+        return row
+    adapter.set_max_length(max_length)
+    try:
+        row.update(measure(adapter, warmup_batches, timed_batches, max_length,
+                           monitor, device))
+    except Exception as exc:                        # noqa: BLE001 - reported per row
+        if device == "cuda":
+            import torch
+            torch.cuda.empty_cache()
+        row["status"] = "OOM" if is_oom(exc) else "error"
+        row["error"] = f"{type(exc).__name__}: {exc}"[:300]
     return row
+
+
+def run_configuration(adapter, texts, dataset, max_length, batch_size, monitor,
+                      device, warmup=WARMUP_RUNS, runs=BENCH_RUNS):
+    """Batch mode: `runs` timed batches of `batch_size` over a rotating window."""
+    return _run(adapter, dataset, max_length, batch_size, monitor, device,
+                [make_batch(texts, batch_size, i) for i in range(warmup)],
+                [make_batch(texts, batch_size, warmup + i) for i in range(runs)])
+
+
+def run_single(adapter, texts, dataset, max_length, monitor, device,
+               warmup=SINGLE_WARMUP, samples=SINGLE_SAMPLES):
+    """Single mode: one request per sample, sequentially, over distinct samples."""
+    n = len(texts) if not samples else min(samples, len(texts))
+    return _run(adapter, dataset, max_length, "single", monitor, device,
+                [[t] for t in texts[:warmup]],
+                [[t] for t in texts[:n]])
 
 
 def print_summary(rows):
     print(f"\n{'=' * 118}\nSUMMARY\n{'=' * 118}")
-    print(f"{'model':<14}{'dataset':<8}{'maxlen':>7}{'bs':>4}{'status':>12}"
+    print(f"{'model':<14}{'dataset':<8}{'maxlen':>7}{'bs':>7}{'status':>12}"
           f"{'tok/batch':>10}{'mean ms':>10}{'p95 ms':>9}{'p99 ms':>9}"
           f"{'samp/s':>12}{'tok/s':>13}{'GPU%':>6}{'peakVRAM':>10}")
     for r in rows:
         if r["status"] != "ok":
             print(f"{r['model']:<14}{r['dataset']:<8}{r['max_length']:>7}"
-                  f"{r['batch_size']:>4}{r['status']:>12}"
+                  f"{str(r['batch_size']):>7}{r['status']:>12}"
                   + (f"   {r['error'][:60]}" if r["error"] else ""))
             continue
-        print(f"{r['model']:<14}{r['dataset']:<8}{r['max_length']:>7}{r['batch_size']:>4}"
+        print(f"{r['model']:<14}{r['dataset']:<8}{r['max_length']:>7}{str(r['batch_size']):>7}"
               f"{r['status']:>12}{r['actual_token_count']:>10.0f}"
               f"{r['latency_mean_ms']:>10.1f}{r['latency_p95_ms']:>9.1f}"
               f"{r['latency_p99_ms']:>9.1f}{r['samples_per_sec']:>12.1f}"
@@ -356,7 +409,7 @@ def print_summary(rows):
             if key not in best or r["samples_per_sec"] > best[key]["samples_per_sec"]:
                 best[key] = r
         for (m, d, L), r in sorted(best.items()):
-            print(f"  {m:<14}{d:<8}maxlen={L:<6}bs={r['batch_size']:<4}"
+            print(f"  {m:<14}{d:<8}maxlen={L:<6}bs={str(r['batch_size']):<7}"
                   f"{r['samples_per_sec']:>12.1f} samp/s  "
                   f"{r['tokens_per_sec']:>13.0f} tok/s")
     counts = defaultdict(int)
@@ -375,23 +428,33 @@ def main():
     ap.add_argument("--output", default=OUTPUT_CSV)
     ap.add_argument("--device", default=None)
     ap.add_argument("--fp32", dest="fp16", action="store_false", default=FP16)
+    ap.add_argument("--no-single", dest="single", action="store_false", default=SINGLE_MODE,
+                    help="skip the single-request mode")
+    ap.add_argument("--single-warmup", type=int, default=SINGLE_WARMUP)
+    ap.add_argument("--single-samples", type=int, default=SINGLE_SAMPLES,
+                    help="requests timed in single mode (default: whole dataset)")
+    ap.add_argument("--no-shuffle", dest="shuffle", action="store_false",
+                    default=SHUFFLE_SAMPLES, help="keep the dataset's sorted order")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
     print("datasets:")
-    datasets = load_datasets()
+    datasets = load_datasets(args.shuffle)
     configs = [(d, L) for d, L in CONFIGURATIONS if d in datasets]
-    grid = [(m, d, L, b) for m in args.models for d, L in configs
-            for b in args.batch_sizes]
+    modes = (["single"] if args.single else []) + list(args.batch_sizes)
+    grid = [(m, d, L, b) for m in args.models for d, L in configs for b in modes]
     print(f"\ngrid: {len(grid)} configurations "
           f"({len(args.models)} models x {len(configs)} dataset/max_length x "
-          f"{len(args.batch_sizes)} batch sizes)")
-    print(f"warmup {args.warmup} (untimed), benchmark {args.runs} runs each")
+          f"{len(modes)} modes: {', '.join(map(str, modes))})")
+    if args.single:
+        n_single = args.single_samples or "all"
+        print(f"single: warmup {args.single_warmup} (untimed), {n_single} requests timed")
+    print(f"batch:  warmup {args.warmup} (untimed), benchmark {args.runs} runs each")
 
     if args.dry_run:
         for m, d, L, b in grid:
             supported = L <= MODELS[m]["cap"]
-            print(f"  {m:<14}{d:<8}maxlen={L:<6}bs={b:<4}"
+            print(f"  {m:<14}{d:<8}maxlen={L:<6}bs={str(b):<7}"
                   f"{'' if supported else '-> unsupported'}")
         return
 
@@ -421,13 +484,25 @@ def main():
         except Exception as exc:                    # noqa: BLE001
             print(f"  load failed: {exc}")
             for d, L in configs:
-                for b in args.batch_sizes:
+                for b in modes:
                     rows.append({"model": name, "dataset": d, "max_length": L,
                                  "batch_size": b, "status": "error", "runs": 0,
                                  "error": f"load failed: {exc}"[:300]})
             continue
 
         for d, L in configs:
+            if args.single:
+                r = run_single(adapter, datasets[d], d, L, monitor, device,
+                               args.single_warmup, args.single_samples)
+                rows.append(r)
+                if r["status"] == "ok":
+                    print(f"  {d:<8}maxlen={L:<6}single "
+                          f"{r['latency_mean_ms']:>9.1f} ms/req  "
+                          f"p95 {r['latency_p95_ms']:>8.1f}  p99 {r['latency_p99_ms']:>8.1f}  "
+                          f"{r['samples_per_sec']:>8.1f} req/s  "
+                          f"({r['runs']} requests)")
+                else:
+                    print(f"  {d:<8}maxlen={L:<6}single {r['status']:>12}  {r['error'][:70]}")
             oom_from = None
             for b in args.batch_sizes:
                 if oom_from is not None and SKIP_LARGER_AFTER_OOM and b > oom_from:
@@ -469,6 +544,9 @@ def main():
 
     meta = {"device": device, "fp16": args.fp16, "warmup_runs": args.warmup,
             "bench_runs": args.runs, "batch_sizes": args.batch_sizes,
+            "single_mode": args.single, "single_warmup": args.single_warmup,
+            "single_samples": args.single_samples or "all",
+            "shuffle_samples": args.shuffle, "seed": SEED,
             "configurations": CONFIGURATIONS, "rotate_samples": ROTATE_SAMPLES,
             "normalize": NORMALIZE, "convert_to_numpy": CONVERT_TO_NUMPY,
             "models": {m: MODELS[m] for m in args.models}}
