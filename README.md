@@ -240,6 +240,21 @@ percentiles span the dataset's whole length distribution. `batch_size=1` is repe
 runs over a window, so it is not the same measurement. `--no-single` skips single mode;
 `--single-samples N` times N requests instead of the whole dataset.
 
+To add single mode to an existing batch run without re-running the batches:
+
+```bash
+python src/benchmark_embedding.py --single-only --merge-into results/benchmark_results.csv
+# or, with the single CSV copied from the GPU machine, no GPU needed:
+python src/benchmark_embedding.py --merge-from results/benchmark_results_single.csv     --merge-into results/benchmark_results.csv
+```
+
+`--single-only` writes `results/benchmark_results_single.csv` and never touches the batch
+CSV unless asked to merge. Merging puts each single row directly before its group's
+batch 1 row, leaves every batch row unchanged, replaces any single row already there so
+re-running is safe, and backs the target up once to `benchmark_results.bak.csv`. Because
+single mode covers every sample, its numbers do not depend on shuffling and sit
+correctly beside batch rows from an earlier, unshuffled run.
+
 The dataset CSVs are sorted by token count, so each is shuffled once with a fixed seed
 before sampling. Without it, small batches only ever see the shortest samples and look
 faster than they are. `--no-shuffle` keeps the sorted order.

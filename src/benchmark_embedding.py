@@ -7,6 +7,9 @@ timed is the raw encode path.
     python src/benchmark_embedding.py
     python src/benchmark_embedding.py --models qwen_0.6 --batch-sizes 1 8
     python src/benchmark_embedding.py --no-single   # batch mode only
+    python src/benchmark_embedding.py --single-only --merge-into results/benchmark_results.csv
+    python src/benchmark_embedding.py --merge-from results/benchmark_results_single.csv \
+        --merge-into results/benchmark_results.csv  # merge an existing single run, no GPU
     python src/benchmark_embedding.py --dry-run     # print the grid, load nothing
 
 Everything worth changing sits in the CONFIG block below.
@@ -54,6 +57,7 @@ DATASET_FILES = {                      # dataset name -> CSV under DATASET_DIR
     "long": "perf_dataset_long.csv",
 }
 OUTPUT_CSV = "results/benchmark_results.csv"
+SINGLE_ONLY_CSV = "results/benchmark_results_single.csv"   # --single-only default output
 
 # Weights download to ./models on first use, as in embed_local.py.
 MODEL_CACHE = "models"
@@ -381,6 +385,53 @@ def run_single(adapter, texts, dataset, max_length, monitor, device,
                 [[t] for t in texts[:n]])
 
 
+def merge_single_rows(single_rows, target_path):
+    """Put single-mode rows into an existing results CSV, ahead of each group's batch rows.
+
+    A group is (model, dataset, max_length). Any single row already in the target for a
+    group being merged is replaced, so re-running is safe; batch rows are never touched.
+    Groups the target does not have are appended at the end. The target is backed up
+    once to <name>.bak.csv before the first write.
+    """
+    import shutil
+
+    def key(r):
+        return (str(r["model"]), str(r["dataset"]), str(r["max_length"]))
+
+    with open(target_path, encoding="utf-8-sig") as f:
+        target = list(csv.DictReader(f))
+    new = {key(r): {k: r.get(k, "") for k in CSV_FIELDS}
+           for r in single_rows if str(r["batch_size"]) == "single"}
+    if not new:
+        raise SystemExit("no single-mode rows to merge")
+
+    merged, placed = [], set()
+    for r in target:
+        k = key(r)
+        if k in new and k not in placed:
+            merged.append(new[k])
+            placed.add(k)
+        if k in new and r["batch_size"] == "single":
+            continue                                # replaced by the new single row
+        merged.append(r)
+    appended = [v for k, v in new.items() if k not in placed]
+    merged += appended
+
+    bak = os.path.splitext(target_path)[0] + ".bak.csv"
+    if not os.path.exists(bak):
+        shutil.copyfile(target_path, bak)
+        print(f"backup -> {rel(bak)}")
+    with open(target_path, "w", encoding="utf-8-sig", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=CSV_FIELDS, extrasaction="ignore")
+        w.writeheader()
+        for r in merged:
+            w.writerow({k: r.get(k, "") for k in CSV_FIELDS})
+    kept_batch = sum(1 for r in target if r["batch_size"] != "single")
+    print(f"merged {len(new)} single rows into {rel(target_path)} "
+          f"({kept_batch} batch rows kept, {len(appended)} single rows appended as new groups, "
+          f"{len(merged)} rows total)")
+
+
 def print_summary(rows):
     print(f"\n{'=' * 118}\nSUMMARY\n{'=' * 118}")
     print(f"{'model':<14}{'dataset':<8}{'maxlen':>7}{'bs':>7}{'status':>12}"
@@ -435,8 +486,26 @@ def main():
                     help="requests timed in single mode (default: whole dataset)")
     ap.add_argument("--no-shuffle", dest="shuffle", action="store_false",
                     default=SHUFFLE_SAMPLES, help="keep the dataset's sorted order")
+    ap.add_argument("--single-only", action="store_true",
+                    help=f"run only single mode; writes {SINGLE_ONLY_CSV} unless --output is given")
+    ap.add_argument("--merge-into", default=None,
+                    help="after the run, merge single rows into this existing results CSV")
+    ap.add_argument("--merge-from", default=None,
+                    help="skip benchmarking: merge single rows from this CSV into --merge-into")
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
+
+    if args.merge_from:
+        if not args.merge_into:
+            ap.error("--merge-from needs --merge-into")
+        with open(abspath(args.merge_from), encoding="utf-8-sig") as f:
+            merge_single_rows(list(csv.DictReader(f)), abspath(args.merge_into))
+        return
+    if args.single_only:
+        args.single = True
+        args.batch_sizes = []
+        if args.output == OUTPUT_CSV:              # never overwrite the batch results
+            args.output = SINGLE_ONLY_CSV
 
     print("datasets:")
     datasets = load_datasets(args.shuffle)
@@ -449,7 +518,10 @@ def main():
     if args.single:
         n_single = args.single_samples or "all"
         print(f"single: warmup {args.single_warmup} (untimed), {n_single} requests timed")
-    print(f"batch:  warmup {args.warmup} (untimed), benchmark {args.runs} runs each")
+    if args.batch_sizes:
+        print(f"batch:  warmup {args.warmup} (untimed), benchmark {args.runs} runs each")
+    print(f"output: {args.output}"
+          + (f"  (then merged into {args.merge_into})" if args.merge_into else ""))
 
     if args.dry_run:
         for m, d, L, b in grid:
@@ -541,6 +613,8 @@ def main():
             w.writerow({k: r.get(k, "") for k in CSV_FIELDS})
     print_summary(rows)
     print(f"\nwrote {len(rows)} rows -> {rel(out)}")
+    if args.merge_into:
+        merge_single_rows(rows, abspath(args.merge_into))
 
     meta = {"device": device, "fp16": args.fp16, "warmup_runs": args.warmup,
             "bench_runs": args.runs, "batch_sizes": args.batch_sizes,
